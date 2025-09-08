@@ -10,8 +10,8 @@ import os
 import time
 
 from ..pubsub.proto import salesforce_events_pb2
-from ..zerobus_sdk import TableProperties
-from ..zerobus_sdk.aio import ZerobusSdk
+from zerobus_sdk import TableProperties
+from zerobus_sdk.aio import ZerobusSdk
 
 
 class DatabricksForwarder:
