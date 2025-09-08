@@ -1,0 +1,49 @@
+resources:
+  jobs:
+    salesforce_zerobus:
+      name: salesforce_zerobus
+      tasks:
+        - task_key: task
+          for_each_task:
+            inputs: ${var.salesforce_objects}
+            concurrency: 100
+            task:
+              task_key: task_iteration
+              notebook_task:
+                notebook_path: ../notebook_task.py
+                base_parameters:
+                  salesforce_object: "{{input}}"
+                source: WORKSPACE
+              environment_key: salesforce_zerobus_env
+              # job_cluster_key: salesforce_zerobus
+          # libraries:
+          #   - whl: dist/*.whl
+      environments:
+        - environment_key: salesforce_zerobus_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ../dist/*.whl
+      performance_target: PERFORMANCE_OPTIMIZED
+      # job_clusters:
+      #   - job_cluster_key: salesforce_zerobus
+      #     new_cluster:
+      #       spark_version: 16.4.x-scala2.12
+      #       spark_conf:
+      #         spark.master: local[*, 4]
+      #         spark.databricks.cluster.profile: singleNode
+      #       aws_attributes:
+      #         first_on_demand: 1
+      #         availability: SPOT_WITH_FALLBACK
+      #         zone_id: us-east-1b
+      #         spot_bid_price_percent: 100
+      #       node_type_id: i3.xlarge
+      #       driver_node_type_id: i3.xlarge
+      #       custom_tags:
+      #         ResourceClass: SingleNode
+      #       spark_env_vars:
+      #         PYSPARK_PYTHON: /databricks/python3/bin/python3
+      #       enable_elastic_disk: true
+      #       data_security_mode: SINGLE_USER
+      #       runtime_engine: STANDARD
+      #       num_workers: 0

@@ -1,0 +1,27 @@
+syntax = "proto2";
+
+message SalesforceEvent {
+    // Event metadata from Pub/Sub API
+    optional string event_id = 1;
+    optional string schema_id = 2;
+    optional string replay_id = 3;
+    optional int64 timestamp = 4;
+    
+    // Change Data Capture fields
+    optional string change_type = 5;         // CREATE, UPDATE, DELETE, UNDELETE
+    optional string entity_name = 6;         // Account, Contact, Opportunity, etc.
+    optional string change_origin = 7;       // Source of the change (API, UI, etc.)
+    
+    // Record information
+    repeated string record_ids = 8;          // List of affected record IDs
+    repeated string changed_fields = 9;      // List of field names that changed
+    repeated string nulled_fields = 13;      // List of field names that were set to null
+    repeated string diff_fields = 14;        // List of field names with differences
+    
+    // Record data as JSON string for flexibility
+    optional string record_data_json = 10;  // Complete record data serialized as JSON
+    
+    // Additional metadata
+    optional string org_id = 11;            // Salesforce organization ID
+    optional int64 processed_timestamp = 12; // When we processed this event
+}
