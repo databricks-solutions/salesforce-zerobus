@@ -28,14 +28,15 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 ## 🚀 Local Quick Start
 ### Installation
 
-**Install from wheel file**
-```bash
-# Download the wheel from releases or build locally
-uv sync
-uv build
-pip install dist/salesforce_zerobus-1.0.0-py3-none-any.whl
-```
+**Prerequisites:**
+1. Obtain the `databricks_zerobus-X.X.X-py3-none-any.whl` file from your Databricks account team
+2. Place the .whl file in the project root directory
 
+**Install dependencies:**
+```bash
+uv add databricks_zerobus-*.whl
+uv sync
+```
 
 ### Minimal Working Example
 
