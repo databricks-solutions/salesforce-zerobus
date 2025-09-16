@@ -4,10 +4,10 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 
 [![Python](https://img.shields.io/badge/Python-3.10-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
 ![Salesforce](https://img.shields.io/badge/Salesforce-00A1E0?logo=salesforce&logoColor=white)
-![GitHub stars](https://img.shields.io/github/stars/DoyleDev/Databricks-Salesforce-Zerobus?style=social)
-![GitHub forks](https://img.shields.io/github/forks/DoyleDev/Databricks-Salesforce-Zerobus?style=social)
-![GitHub issues](https://img.shields.io/github/issues/DoyleDev/Databricks-Salesforce-Zerobus)
-![GitHub last commit](https://img.shields.io/github/last-commit/DoyleDev/Databricks-Salesforce-Zerobus)
+![GitHub stars](https://img.shields.io/github/stars/databricks-solutions/salesforce-zerobus?style=social)
+![GitHub forks](https://img.shields.io/github/forks/databricks-solutions/salesforce-zerobus?style=social)
+![GitHub issues](https://img.shields.io/github/issues/databricks-solutions/salesforce-zerobus)
+![GitHub last commit](https://img.shields.io/github/last-commit/databricks-solutions/salesforce-zerobus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Reach out to your Databricks account team for private preview access to Databricks Zerobus!
