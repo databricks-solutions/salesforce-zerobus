@@ -517,3 +517,4 @@ Databricks support doesn't cover this content. For questions or bugs, please ope
 
 | library                                | description             | license    | source                                              |
 |----------------------------------------|-------------------------|------------|-----------------------------------------------------|
+| Salesforce Pub/Sub API | gRPC API framework | Creative Commons Zero v1.0 Universal | [GitHub](https://github.com/forcedotcom/pub-sub-api/blob/main/LICENSE) | 
