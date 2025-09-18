@@ -159,7 +159,11 @@ CREATE TABLE IF NOT EXISTS your_catalog.your_schema.account_events (
   change_origin STRING COMMENT 'Source of the change (API, UI, etc.)',
   record_ids ARRAY<STRING> COMMENT 'List of affected Salesforce record IDs',
   changed_fields ARRAY<STRING> COMMENT 'List of field names that were modified',
+  nulled_fields ARRAY<STRING> COMMENT 'List of field names that were set to null',
+  diff_fields ARRAY<STRING> COMMENT 'List of field names with differences',
   record_data_json STRING COMMENT 'Complete record data serialized as JSON',
+  payload_binary BINARY COMMENT 'Raw Avro binary payload for schema-based parsing',
+  schema_json STRING COMMENT 'Avro schema JSON string for parsing binary payload',
   org_id STRING COMMENT 'Salesforce organization ID',
   processed_timestamp BIGINT COMMENT 'When this event was processed by our pipeline'
 )
@@ -381,11 +385,51 @@ Events are stored in Databricks with this schema:
 | `nulled_fields` | ARRAY<STRING> | Names of fields that were set to null |
 | `diff_fields` | ARRAY<STRING> | Names of fields with differences (alternative to changed_fields) |
 | `record_data_json` | STRING | Complete record data as JSON string |
+| `payload_binary` | BINARY | **NEW**: Raw Avro binary payload for schema-based parsing |
+| `schema_json` | STRING | **NEW**: Avro schema JSON string for parsing binary payload |
 | `org_id` | STRING | Salesforce organization ID |
 | `processed_timestamp` | BIGINT | When our pipeline processed this event |
 
-### Sample Event Data
-```Python
+### Lakeflow Declarative Pipeline Ingestion
+**Deploy** the DAB with the Lakeflow declarative pipeline to ingest and flatten your Salesforce data.
+**NEW**: Use `payload_binary` and `schema_json` for individual field extraction with automatic schema evolution support:
+
+**Schema Evolution**: When the object schema changes restart the pipeline (not a full refresh) to get the latest schema
+
+```python
+from pyspark import pipelines as dp
+from pyspark.sql.avro.functions import from_avro
+from pyspark.sql.functions import col, desc
+
+
+@dp.table(name="<table_name_here>")
+def ingest_salesforce():
+    table = "<your_zerobus_table_here>"
+
+    df = dp.readStream(table)
+
+    latest_schema = (
+        dp.read(table)
+        .filter(col("payload_binary").isNotNull() & col("schema_json").isNotNull())
+        .orderBy(desc("timestamp"))
+        .select("schema_json")
+        .first()[0]
+    )
+
+    df = df.select(
+        "*",
+        from_avro(col("payload_binary"), latest_schema, {"mode": "PERMISSIVE"}).alias(
+            "parsed_data"
+        ),
+    )
+    return df.select("*", "parsed_data.*").drop("parsed_data")
+```
+
+### Legacy JSON Parsing
+
+For backward compatibility, you can still use the JSON approach:
+
+```python
 from pyspark.sql.functions import *
 
 df = spark.read.table('catalog.schema.table')
@@ -398,6 +442,13 @@ df_final = df_parsed.select("event_id","schema_id", "replay_id", "timestamp", "p
 
 df_final.display()
 ```
+
+### Benefits of Schema-Based Parsing
+
+- ✅ **Automatic Schema Evolution**: Handles new fields added to Salesforce objects
+- ✅ **Type Safety**: Preserves Avro data types vs. JSON string conversion
+- ✅ **Performance**: More efficient than JSON parsing for large datasets
+- ✅ **Field-Level Access**: Direct access to individual Salesforce fields as columns
 
 ### Querying Event Data
 

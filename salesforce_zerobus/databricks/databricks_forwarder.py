@@ -54,13 +54,15 @@ class DatabricksForwarder:
             self.logger.error(f"Failed to initialize stream: {e}")
             raise
 
-    async def forward_event(self, salesforce_event_data: dict, org_id: str):
+    async def forward_event(self, salesforce_event_data: dict, org_id: str, payload_binary: bytes = None, schema_json: str = None):
         """
         Convert Salesforce CDC event to protobuf and forward to Databricks.
 
         Args:
             salesforce_event_data: Decoded Salesforce event data
             org_id: Salesforce organization ID
+            payload_binary: Raw Avro binary payload from Salesforce (optional)
+            schema_json: Avro schema JSON string for parsing (optional)
         """
         if not self.stream:
             await self.initialize_stream()
@@ -106,6 +108,8 @@ class DatabricksForwarder:
                 nulled_fields=nulled_fields,
                 diff_fields=diff_fields,
                 record_data_json=record_data_json,
+                payload_binary=payload_binary if payload_binary is not None else b"",
+                schema_json=schema_json if schema_json is not None else "",
                 org_id=org_id,
                 processed_timestamp=int(time.time() * 1000),
             )
