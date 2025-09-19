@@ -14,7 +14,7 @@ logging.basicConfig(
 )
 
 streamer = SalesforceZerobus(
-    sf_object_channel="AccountChangeEvent",
+    sf_object_channel="AccountChangeEvent",  # Use "ChangeEvents" to get change events for all objects
     databricks_table="catalog.schema.table",
     salesforce_auth={
         "username": os.getenv("SALESFORCE_USERNAME"),

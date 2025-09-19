@@ -34,3 +34,5 @@ targets:
       salesforce_objects: '["AccountChangeEvent", "LeadChangeEvent", "OpportunityChangeEvent", "ContactChangeEvent"]'
       ldp_catalog: 'your_catalog_here'
       ldp_schema: 'your_schema_here'
+
+#TODO: extend the salesforce_object variables to the LDP to loop through the tables and create a table for each object
