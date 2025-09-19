@@ -123,6 +123,58 @@ async def main():
 asyncio.run(main())
 ```
 
+## 🌐 Multi-Object Streaming with ChangeEvents
+
+### Stream All Salesforce Objects at Once
+
+Instead of subscribing to individual object channels like `AccountChangeEvent` or `LeadChangeEvent`, you can subscribe to **all change events** across your entire Salesforce org using the `ChangeEvents` channel:
+
+```python
+from salesforce_zerobus import SalesforceZerobus
+
+streamer = SalesforceZerobus(
+    # Subscribe to ALL object changes in your Salesforce org
+    sf_object_channel="ChangeEvents",
+
+    databricks_table="catalog.schema.all_salesforce_events",
+    salesforce_auth={...},
+    databricks_auth={...}
+)
+
+streamer.start()
+```
+
+### Key Benefits
+
+- **🎯 Single Stream**: Capture Account, Contact, Lead, Opportunity, Custom Objects, etc. in one subscription
+- **🚀 Automatic Schema Handling**: Library automatically manages different schemas for each object type
+- **📊 Unified Table**: All events go to one Delta table with `entity_name` identifying the object type
+- **⚡ Efficient Caching**: Schemas are cached per object type for optimal performance
+
+### Understanding Multi-Object Data
+
+With `ChangeEvents`, each event includes an `entity_name` field identifying the object:
+
+```bash
+INFO - Received Account UPDATE 001abc123def456
+INFO - Received Contact CREATE 003xyz789ghi012
+INFO - Received CustomObject__c DELETE 001def456abc789
+```
+
+### When to Use ChangeEvents vs Specific Objects
+
+**Use `ChangeEvents` when:**
+- You need a comprehensive view of all Salesforce activity
+- Building data lake ingestion for entire org
+- Creating audit trails or compliance monitoring
+- Prototyping or exploring data patterns
+
+**Use specific objects (e.g., `AccountChangeEvent`) when:**
+- You only care about specific object types
+- Building targeted integrations
+- Need to minimize data volume and processing
+- Want separate tables per object type
+
 ## 📋 Prerequisites & Local Setup
 
 ### 1. Salesforce Setup
