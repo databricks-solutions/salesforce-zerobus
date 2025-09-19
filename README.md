@@ -453,28 +453,41 @@ from pyspark import pipelines as dp
 from pyspark.sql.avro.functions import from_avro
 from pyspark.sql.functions import col, desc
 
+def create_pipeline(salesforce_object):
+    @dp.table(name=f"salesforce_parsed_{salesforce_object}")
+    def parse_salesforce_stream():
+        df = dp.readStream(zerobus_table).filter(
+            col("entity_name") == salesforce_object
+        )
 
-@dp.table(name="<table_name_here>")
-def ingest_salesforce():
-    table = "<your_zerobus_table_here>"
+        latest_schema = (
+            dp.read(zerobus_table)
+            .filter(
+                (col("entity_name") == salesforce_object)
+                & (col("payload_binary").isNotNull())
+                & (col("schema_json").isNotNull())
+            )
+            .orderBy(desc("timestamp"))
+            .select("schema_json")
+            .first()[0]
+        )
 
-    df = dp.readStream(table)
+        df = df.select(
+            "*",
+            from_avro(
+                col("payload_binary"), latest_schema, {"mode": "PERMISSIVE"}
+            ).alias("parsed_data"),
+        )
+        return df.select("*", "parsed_data.*").drop("parsed_data")
 
-    latest_schema = (
-        dp.read(table)
-        .filter(col("payload_binary").isNotNull() & col("schema_json").isNotNull())
-        .orderBy(desc("timestamp"))
-        .select("schema_json")
-        .first()[0]
-    )
 
-    df = df.select(
-        "*",
-        from_avro(col("payload_binary"), latest_schema, {"mode": "PERMISSIVE"}).alias(
-            "parsed_data"
-        ),
-    )
-    return df.select("*", "parsed_data.*").drop("parsed_data")
+zerobus_table = "<your_zerobus_table_name>"
+salesforce_objects = [
+    sf_object.entity_name
+    for sf_object in dp.read(zerobus_table).select("entity_name").distinct().collect()
+]
+for salesforce_object in salesforce_objects:
+    create_pipeline(salesforce_object)
 ```
 
 ### Legacy JSON Parsing
