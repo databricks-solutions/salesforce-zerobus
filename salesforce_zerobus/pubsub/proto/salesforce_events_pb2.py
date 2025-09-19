@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17salesforce_events.proto\"\xbc\x02\n\x0fSalesforceEvent\x12\x10\n\x08\x65vent_id\x18\x01 \x01(\t\x12\x11\n\tschema_id\x18\x02 \x01(\t\x12\x11\n\treplay_id\x18\x03 \x01(\t\x12\x11\n\ttimestamp\x18\x04 \x01(\x03\x12\x13\n\x0b\x63hange_type\x18\x05 \x01(\t\x12\x13\n\x0b\x65ntity_name\x18\x06 \x01(\t\x12\x15\n\rchange_origin\x18\x07 \x01(\t\x12\x12\n\nrecord_ids\x18\x08 \x03(\t\x12\x16\n\x0e\x63hanged_fields\x18\t \x03(\t\x12\x15\n\rnulled_fields\x18\r \x03(\t\x12\x13\n\x0b\x64iff_fields\x18\x0e \x03(\t\x12\x18\n\x10record_data_json\x18\n \x01(\t\x12\x0e\n\x06org_id\x18\x0b \x01(\t\x12\x1b\n\x13processed_timestamp\x18\x0c \x01(\x03')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17salesforce_events.proto\"\xe9\x02\n\x0fSalesforceEvent\x12\x10\n\x08\x65vent_id\x18\x01 \x01(\t\x12\x11\n\tschema_id\x18\x02 \x01(\t\x12\x11\n\treplay_id\x18\x03 \x01(\t\x12\x11\n\ttimestamp\x18\x04 \x01(\x03\x12\x13\n\x0b\x63hange_type\x18\x05 \x01(\t\x12\x13\n\x0b\x65ntity_name\x18\x06 \x01(\t\x12\x15\n\rchange_origin\x18\x07 \x01(\t\x12\x12\n\nrecord_ids\x18\x08 \x03(\t\x12\x16\n\x0e\x63hanged_fields\x18\t \x03(\t\x12\x15\n\rnulled_fields\x18\r \x03(\t\x12\x13\n\x0b\x64iff_fields\x18\x0e \x03(\t\x12\x18\n\x10record_data_json\x18\n \x01(\t\x12\x16\n\x0epayload_binary\x18\x0f \x01(\x0c\x12\x13\n\x0bschema_json\x18\x10 \x01(\t\x12\x0e\n\x06org_id\x18\x0b \x01(\t\x12\x1b\n\x13processed_timestamp\x18\x0c \x01(\x03')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,5 +32,5 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'salesforce_events_pb2', _gl
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_SALESFORCEEVENT']._serialized_start=28
-  _globals['_SALESFORCEEVENT']._serialized_end=344
+  _globals['_SALESFORCEEVENT']._serialized_end=389
 # @@protoc_insertion_point(module_scope)

@@ -13,8 +13,14 @@ variables:
   salesforce_objects:
     description: List of Salesforce objects to ingest
     default: not_specified
+  ldp_catalog:
+    description: List of Salesforce objects to ingest
+    default: not_specified
+  ldp_schema:
+    description: List of Salesforce objects to ingest
+    default: not_specified
 
-includes:
+include:
   - resources/*.yml
 
 
@@ -26,3 +32,5 @@ targets:
     #   root_path: /Workspace/Users//.bundle/${bundle.name}/${bundle.target}
     variables:
       salesforce_objects: '["AccountChangeEvent", "LeadChangeEvent", "OpportunityChangeEvent", "ContactChangeEvent"]'
+      ldp_catalog: 'your_catalog'
+      ldp_schema: 'your_schema'

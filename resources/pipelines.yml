@@ -1,0 +1,20 @@
+resources:
+  pipelines:
+    salesforce_declarative_pipeline:
+      name: salesforce_declarative_pipeline
+      catalog: ${var.ldp_catalog}
+      schema: ${var.ldp_schema}
+      continuous: true
+      channel: CURRENT
+      serverless: true
+      photon: true
+      development: true
+      edition: ADVANCED
+      libraries:
+        - file:
+            path: ../lakeflow_declarative_pipeline.py
+
+      configuration:
+        bundle.sourcePath: ${workspace.file_path}/src
+        catalog: ${var.ldp_catalog}
+        schema: ${var.ldp_schema}

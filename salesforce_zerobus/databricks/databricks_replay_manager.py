@@ -237,6 +237,8 @@ class DatabricksReplayManager:
                     nulled_fields ARRAY<STRING> COMMENT 'List of fields that were set to null',
                     diff_fields ARRAY<STRING> COMMENT 'List of fields with differences',
                     record_data_json STRING COMMENT 'Complete CDC event data as JSON',
+                    payload_binary BINARY COMMENT 'Raw Avro binary payload from Salesforce for schema-based parsing',
+                    schema_json STRING COMMENT 'Avro schema JSON string for parsing binary payload',
                     org_id STRING COMMENT 'Salesforce organization ID',
                     processed_timestamp BIGINT COMMENT 'When the event was processed (epoch milliseconds)'
                 )

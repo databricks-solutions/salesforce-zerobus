@@ -393,8 +393,13 @@ class SalesforceZerobus:
                                 f"Received {entity_name} {change_type} {record_id}"
                             )
 
-                        # Queue for async processing
-                        self.event_queue.put(decoded_event)
+                        # Queue for async processing with binary payload and schema for Avro parsing
+                        event_package = {
+                            "decoded_event": decoded_event,
+                            "payload_binary": payload_bytes,
+                            "schema_json": json_schema
+                        }
+                        self.event_queue.put(event_package)
 
                     except Exception as e:
                         self.logger.error(f"Error processing event: {e}")
@@ -417,9 +422,12 @@ class SalesforceZerobus:
         while self.running:
             try:
                 if not self.event_queue.empty():
-                    event_data = self.event_queue.get_nowait()
+                    event_package = self.event_queue.get_nowait()
                     await self._databricks_forwarder.forward_event(
-                        event_data, self.org_id
+                        event_package["decoded_event"],
+                        self.org_id,
+                        event_package["payload_binary"],
+                        event_package["schema_json"]
                     )
                     self.event_queue.task_done()
                 else:

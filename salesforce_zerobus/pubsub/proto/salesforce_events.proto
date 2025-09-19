@@ -20,7 +20,11 @@ message SalesforceEvent {
     
     // Record data as JSON string for flexibility
     optional string record_data_json = 10;  // Complete record data serialized as JSON
-    
+
+    // Avro parsing support for schema-based field extraction
+    optional bytes payload_binary = 15;     // Raw Avro binary payload from Salesforce
+    optional string schema_json = 16;       // Avro schema JSON string for parsing binary payload
+
     // Additional metadata
     optional string org_id = 11;            // Salesforce organization ID
     optional int64 processed_timestamp = 12; // When we processed this event

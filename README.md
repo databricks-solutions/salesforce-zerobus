@@ -54,10 +54,10 @@ logging.basicConfig(
 # Initialize the streamer
 streamer = SalesforceZerobus(
     # What Salesforce CDC channel to monitor  
-    sf_object_channel="AccountChangeEvent",
+    sf_object_channel="ChangeEvents",
     
     # Where to send the data in Databricks
-    databricks_table="your_catalog.your_schema.account_events", # If the table doesn't exist the service will create the table for you.
+    databricks_table="your_catalog.your_schema.all_change_events", # If the table doesn't exist the service will create the table for you.
     
     # Salesforce credentials
     salesforce_auth={
@@ -123,6 +123,58 @@ async def main():
 asyncio.run(main())
 ```
 
+## 🌐 Multi-Object Streaming with ChangeEvents
+
+### Stream All Salesforce Objects at Once
+
+Instead of subscribing to individual object channels like `AccountChangeEvent` or `LeadChangeEvent`, you can subscribe to **all change events** across your entire Salesforce org using the `ChangeEvents` channel:
+
+```python
+from salesforce_zerobus import SalesforceZerobus
+
+streamer = SalesforceZerobus(
+    # Subscribe to ALL object changes in your Salesforce org
+    sf_object_channel="ChangeEvents",
+
+    databricks_table="catalog.schema.all_salesforce_events",
+    salesforce_auth={...},
+    databricks_auth={...}
+)
+
+streamer.start()
+```
+
+### Key Benefits
+
+- **🎯 Single Stream**: Capture Account, Contact, Lead, Opportunity, Custom Objects, etc. in one subscription
+- **🚀 Automatic Schema Handling**: Library automatically manages different schemas for each object type
+- **📊 Unified Table**: All events go to one Delta table with `entity_name` identifying the object type
+- **⚡ Efficient Caching**: Schemas are cached per object type for optimal performance
+
+### Understanding Multi-Object Data
+
+With `ChangeEvents`, each event includes an `entity_name` field identifying the object:
+
+```bash
+INFO - Received Account UPDATE 001abc123def456
+INFO - Received Contact CREATE 003xyz789ghi012
+INFO - Received CustomObject__c DELETE 001def456abc789
+```
+
+### When to Use ChangeEvents vs Specific Objects
+
+**Use `ChangeEvents` when:**
+- You need a comprehensive view of all Salesforce activity
+- Building data lake ingestion for entire org
+- Creating audit trails or compliance monitoring
+- Prototyping or exploring data patterns
+
+**Use specific objects (e.g., `AccountChangeEvent`) when:**
+- You only care about specific object types
+- Building targeted integrations
+- Need to minimize data volume and processing
+- Want separate tables per object type
+
 ## 📋 Prerequisites & Local Setup
 
 ### 1. Salesforce Setup
@@ -159,12 +211,15 @@ CREATE TABLE IF NOT EXISTS your_catalog.your_schema.account_events (
   change_origin STRING COMMENT 'Source of the change (API, UI, etc.)',
   record_ids ARRAY<STRING> COMMENT 'List of affected Salesforce record IDs',
   changed_fields ARRAY<STRING> COMMENT 'List of field names that were modified',
+  nulled_fields ARRAY<STRING> COMMENT 'List of field names that were set to null',
+  diff_fields ARRAY<STRING> COMMENT 'List of field names with differences',
   record_data_json STRING COMMENT 'Complete record data serialized as JSON',
+  payload_binary BINARY COMMENT 'Raw Avro binary payload for schema-based parsing',
+  schema_json STRING COMMENT 'Avro schema JSON string for parsing binary payload',
   org_id STRING COMMENT 'Salesforce organization ID',
   processed_timestamp BIGINT COMMENT 'When this event was processed by our pipeline'
 )
 USING DELTA
-PARTITIONED BY (DATE(FROM_UNIXTIME(timestamp/1000)))
 TBLPROPERTIES (
   'delta.enableRowTracking' = 'false',
   'delta.autoOptimize.optimizeWrite' = 'true',
@@ -185,8 +240,8 @@ COMMENT 'Real-time Salesforce Change Data Capture events';
 ```python
 streamer = SalesforceZerobus(
     # Required parameters
-    sf_object_channel="AccountChangeEvent", # Salesforce CDC channel (AccountChangeEvent, CustomObject__cChangeEvent)
-    databricks_table="cat.schema.table",   # Target Databricks table
+    sf_object_channel="AccountChangeEvent", # Salesforce CDC channel (AccountChangeEvent, CustomObject__cChangeEvent, or ChangeEvents)
+    databricks_table="catalog.schema.table",   # Target Databricks table
     salesforce_auth={                      # Salesforce credentials dict
         "username": "user@company.com",
         "password": "password+token", 
@@ -229,6 +284,8 @@ Running the following commands in the terminal will deploy a serverless job, the
 ### Supported Salesforce Objects
 
 Works with any Salesforce object that has Change Data Capture enabled:
+#### Read Every Object Change
+- `ChangeEvents`
 
 #### Standard Objects
 - `Account`, `Contact`, `Lead`, `Opportunity`, `Case`
@@ -381,39 +438,66 @@ Events are stored in Databricks with this schema:
 | `nulled_fields` | ARRAY<STRING> | Names of fields that were set to null |
 | `diff_fields` | ARRAY<STRING> | Names of fields with differences (alternative to changed_fields) |
 | `record_data_json` | STRING | Complete record data as JSON string |
+| `payload_binary` | BINARY | **NEW**: Raw Avro binary payload for schema-based parsing |
+| `schema_json` | STRING | **NEW**: Avro schema JSON string for parsing binary payload |
 | `org_id` | STRING | Salesforce organization ID |
 | `processed_timestamp` | BIGINT | When our pipeline processed this event |
 
-### Sample Event Data
-```Python
-from pyspark.sql.functions import *
+### Lakeflow Declarative Pipeline Ingestion
+**Deploy** the DAB with the Lakeflow declarative pipeline to ingest and flatten your Salesforce data.
+**NEW**: Use `payload_binary` and `schema_json` for individual field extraction with automatic schema evolution support:
 
-df = spark.read.table('catalog.schema.table')
+**Schema Evolution**: When the object schema changes restart the pipeline (not a full refresh) to get the latest schema
 
-json_schema = schema_of_json(df.select("record_data_json").first()['record_data_json'])
+```python
+from pyspark import pipelines as dp
+from pyspark.sql.avro.functions import from_avro
+from pyspark.sql.functions import col, desc
 
-df_parsed = df.withColumn("jsonData", from_json("record_data_json", json_schema))
+def create_pipeline(salesforce_object):
+    @dp.table(name=f"salesforce_parsed_{salesforce_object}")
+    def parse_salesforce_stream():
+        df = dp.readStream(zerobus_table).filter(
+            col("entity_name") == salesforce_object
+        )
 
-df_final = df_parsed.select("event_id","schema_id", "replay_id", "timestamp", "processed_timestamp", "change_type", "entity_name", "change_origin", "record_ids", "changed_fields", "org_id", "jsonData.*")
+        latest_schema = (
+            dp.read(zerobus_table)
+            .filter(
+                (col("entity_name") == salesforce_object)
+                & (col("payload_binary").isNotNull())
+                & (col("schema_json").isNotNull())
+            )
+            .orderBy(desc("timestamp"))
+            .select("schema_json")
+            .first()[0]
+        )
 
-df_final.display()
+        df = df.select(
+            "*",
+            from_avro(
+                col("payload_binary"), latest_schema, {"mode": "PERMISSIVE"}
+            ).alias("parsed_data"),
+        )
+        return df.select("*", "parsed_data.*").drop("parsed_data")
+
+
+zerobus_table = "<your_zerobus_table_name>"
+salesforce_objects = [
+    sf_object.entity_name
+    for sf_object in dp.read(zerobus_table).select("entity_name").distinct().collect()
+]
+for salesforce_object in salesforce_objects:
+    create_pipeline(salesforce_object)
 ```
 
-### Querying Event Data
+### Benefits of Schema-Based Parsing
 
-```sql
--- Recent account changes
-SELECT 
-    change_type,
-    record_ids[0] as record_id,
-    changed_fields,
-    FROM_UNIXTIME(timestamp/1000) as event_time,
-    JSON_EXTRACT(record_data_json, '$.Name') as account_name
-FROM your_catalog.your_schema.account_events 
-WHERE DATE(FROM_UNIXTIME(timestamp/1000)) = CURRENT_DATE()
-ORDER BY timestamp DESC 
-LIMIT 10;
-```
+- ✅ **Automatic Schema Evolution**: Handles new fields added to Salesforce objects
+- ✅ **Type Safety**: Preserves Avro data types vs. JSON string conversion
+- ✅ **Performance**: More efficient than JSON parsing for large datasets
+- ✅ **Field-Level Access**: Direct access to individual Salesforce fields as columns
+
 
 ### Regenerating Protocol Buffer Files
 
