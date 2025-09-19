@@ -8,6 +8,10 @@ artifacts:
     type: whl
     build: uv build --wheel
     path: .
+  # app_whl:
+  #   type: whl
+  #   build: uv build --wheel
+  #   path: .
 
 variables:
   salesforce_objects:

@@ -1,0 +1,25 @@
+command: ["python", "main.py"]
+
+env:
+  - name: 'SALESFORCE_USERNAME'
+    value: ''
+  - name: 'SALESFORCE_PASSWORD'
+    value: ''
+  - name: 'SALESFORCE_INSTANCE_URL'
+    value: ''
+  - name: 'SALESFORCE_CHANGE_EVENT_CHANNEL' # Optional, defaults to "ChangeEvents"
+    value: ''
+  - name: 'DATABRICKS_WORKSPACE_URL'
+    value: ''
+  - name: 'DATABRICKS_API_TOKEN'
+    value: ''
+  - name: 'DATABRICKS_INGEST_ENDPOINT'
+    value: ''
+  - name: 'DATABRICKS_ZEROBUS_TARGET_TABLE'
+    value: ''
+  - name: 'DATABRICKS_SQL_ENDPOINT' # Optional
+    value: ''
+  - name: 'DATABRICKS_SQL_WORKSPACE_URL' # Optional
+    value: ''
+  - name: 'DATABRICKS_SQL_API_TOKEN' # Optional
+    value: ''

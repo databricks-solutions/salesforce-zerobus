@@ -14,8 +14,10 @@ logging.basicConfig(
 )
 
 streamer = SalesforceZerobus(
-    sf_object_channel="ChangeEvents",  # Use "ChangeEvents" to get change events for ALL objects, otherwise specify a specific object like "AccountChangeEvent"
-    databricks_table="catalog.schema.salesforce_change_events",
+    sf_object_channel=os.getenv(
+        "SALESFORCE_CHANGE_EVENT_CHANNEL"
+    ),  # Use "ChangeEvents" to get change events for ALL objects, otherwise specify a specific object like "AccountChangeEvent"
+    databricks_table=os.getenv("DATABRICKS_ZEROBUS_TARGET_TABLE"),
     salesforce_auth={
         "username": os.getenv("SALESFORCE_USERNAME"),
         "password": os.getenv("SALESFORCE_PASSWORD"),
@@ -36,4 +38,5 @@ print(
     f"Monitoring Channel:{streamer.sf_object_channel} → Databricks Table:{streamer.databricks_table}"
 )
 
-streamer.start()
+if __name__ == "__main__":
+    streamer.start()

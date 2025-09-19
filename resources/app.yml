@@ -1,0 +1,5 @@
+resources:
+  apps:
+    salesforce-zerobus-app:
+      name: "salesforce-zerobus-app"
+      source_code_path: ../
