@@ -54,10 +54,10 @@ logging.basicConfig(
 # Initialize the streamer
 streamer = SalesforceZerobus(
     # What Salesforce CDC channel to monitor  
-    sf_object_channel="AccountChangeEvent",
+    sf_object_channel="ChangeEvents",
     
     # Where to send the data in Databricks
-    databricks_table="your_catalog.your_schema.account_events", # If the table doesn't exist the service will create the table for you.
+    databricks_table="your_catalog.your_schema.all_change_events", # If the table doesn't exist the service will create the table for you.
     
     # Salesforce credentials
     salesforce_auth={
@@ -220,7 +220,6 @@ CREATE TABLE IF NOT EXISTS your_catalog.your_schema.account_events (
   processed_timestamp BIGINT COMMENT 'When this event was processed by our pipeline'
 )
 USING DELTA
-PARTITIONED BY (DATE(FROM_UNIXTIME(timestamp/1000)))
 TBLPROPERTIES (
   'delta.enableRowTracking' = 'false',
   'delta.autoOptimize.optimizeWrite' = 'true',
@@ -241,8 +240,8 @@ COMMENT 'Real-time Salesforce Change Data Capture events';
 ```python
 streamer = SalesforceZerobus(
     # Required parameters
-    sf_object_channel="AccountChangeEvent", # Salesforce CDC channel (AccountChangeEvent, CustomObject__cChangeEvent)
-    databricks_table="cat.schema.table",   # Target Databricks table
+    sf_object_channel="AccountChangeEvent", # Salesforce CDC channel (AccountChangeEvent, CustomObject__cChangeEvent, or ChangeEvents)
+    databricks_table="catalog.schema.table",   # Target Databricks table
     salesforce_auth={                      # Salesforce credentials dict
         "username": "user@company.com",
         "password": "password+token", 
@@ -285,6 +284,8 @@ Running the following commands in the terminal will deploy a serverless job, the
 ### Supported Salesforce Objects
 
 Works with any Salesforce object that has Change Data Capture enabled:
+#### Read Every Object Change
+- `ChangeEvents`
 
 #### Standard Objects
 - `Account`, `Contact`, `Lead`, `Opportunity`, `Case`
@@ -490,24 +491,6 @@ for salesforce_object in salesforce_objects:
     create_pipeline(salesforce_object)
 ```
 
-### Legacy JSON Parsing
-
-For backward compatibility, you can still use the JSON approach:
-
-```python
-from pyspark.sql.functions import *
-
-df = spark.read.table('catalog.schema.table')
-
-json_schema = schema_of_json(df.select("record_data_json").first()['record_data_json'])
-
-df_parsed = df.withColumn("jsonData", from_json("record_data_json", json_schema))
-
-df_final = df_parsed.select("event_id","schema_id", "replay_id", "timestamp", "processed_timestamp", "change_type", "entity_name", "change_origin", "record_ids", "changed_fields", "org_id", "jsonData.*")
-
-df_final.display()
-```
-
 ### Benefits of Schema-Based Parsing
 
 - ✅ **Automatic Schema Evolution**: Handles new fields added to Salesforce objects
@@ -515,21 +498,6 @@ df_final.display()
 - ✅ **Performance**: More efficient than JSON parsing for large datasets
 - ✅ **Field-Level Access**: Direct access to individual Salesforce fields as columns
 
-### Querying Event Data
-
-```sql
--- Recent account changes
-SELECT 
-    change_type,
-    record_ids[0] as record_id,
-    changed_fields,
-    FROM_UNIXTIME(timestamp/1000) as event_time,
-    JSON_EXTRACT(record_data_json, '$.Name') as account_name
-FROM your_catalog.your_schema.account_events 
-WHERE DATE(FROM_UNIXTIME(timestamp/1000)) = CURRENT_DATE()
-ORDER BY timestamp DESC 
-LIMIT 10;
-```
 
 ### Regenerating Protocol Buffer Files
 
