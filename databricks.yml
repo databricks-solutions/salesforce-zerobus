@@ -4,14 +4,10 @@ bundle:
   name: salesforce-zerobus
 
 artifacts:
-  default:
+  app_whl:
     type: whl
-    build: uv build --wheel
+    build: uv build --wheel && rm -f dist/.gitignore
     path: .
-  # app_whl:
-  #   type: whl
-  #   build: uv build --wheel
-  #   path: .
 
 variables:
   salesforce_objects:
@@ -31,9 +27,9 @@ include:
 targets:
   dev:
     default: true
-    mode: development
+    mode: production
     # workspace:
-    #   root_path: /Workspace/Users//.bundle/${bundle.name}/${bundle.target}
+    #   root_path: /Workspace/Users/.bundle/${bundle.name}/${bundle.target}
     variables:
       salesforce_objects: '["AccountChangeEvent", "LeadChangeEvent", "OpportunityChangeEvent", "ContactChangeEvent"]'
       ldp_catalog: 'your_catalog'

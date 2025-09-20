@@ -2,4 +2,4 @@ resources:
   apps:
     salesforce-zerobus-app:
       name: "salesforce-zerobus-app"
-      source_code_path: ../
+      source_code_path: /Workspace/Users/.bundle/${bundle.name}/${bundle.target}

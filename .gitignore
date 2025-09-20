@@ -5,12 +5,12 @@ __pycache__/
 
 # C extensions
 *.so
-
+!dist/*.whl
+!**/*.whl
 # Distribution / packaging
 .Python
 build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -19,7 +19,6 @@ lib64/
 parts/
 sdist/
 var/
-# wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -53,7 +52,6 @@ coverage.xml
 .pytest_cache/
 cover/
 salesforce_zerobus/zerobus_sdk
-wheels/
 # Translations
 *.mo
 *.pot
