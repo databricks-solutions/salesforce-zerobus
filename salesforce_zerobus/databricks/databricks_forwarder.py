@@ -50,15 +50,9 @@ class DatabricksForwarder:
         if not self.stream:
             return False
 
-        # Check if stream has a method to verify its state
-        # The ZerobusSdk stream object should have some way to check if it's still valid
-        try:
-            # Most stream objects have an internal state or connection status
-            # If the stream was closed, it should be detectable
-            return hasattr(self.stream, '_closed') and not getattr(self.stream, '_closed', True)
-        except:
-            # If we can't determine the state, assume it needs recreation
-            return False
+        # Assume stream is active unless proven otherwise
+        # Stream recreation will only happen when ingest_record() actually fails
+        return True
 
     async def initialize_stream(self):
         """Create the ingest stream to the Delta table."""
@@ -88,9 +82,8 @@ class DatabricksForwarder:
             payload_binary: Raw Avro binary payload from Salesforce (optional)
             schema_json: Avro schema JSON string for parsing (optional)
         """
-        # Check if stream needs initialization or recreation
-        if not self._is_stream_active():
-            self.logger.info("Stream not active, initializing/recreating stream")
+        # Initialize stream only if it doesn't exist
+        if not self.stream:
             await self.initialize_stream()
 
         try:
