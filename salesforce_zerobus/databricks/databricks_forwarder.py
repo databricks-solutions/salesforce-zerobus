@@ -45,13 +45,37 @@ class DatabricksForwarder:
         self.stream = None
         self.logger = logging.getLogger(__name__)
 
+    def _is_stream_active(self) -> bool:
+        """Check if the current stream is active and ready for ingestion."""
+        if not self.stream:
+            return False
+
+        # Check if stream has a method to verify its state
+        # The ZerobusSdk stream object should have some way to check if it's still valid
+        try:
+            # Most stream objects have an internal state or connection status
+            # If the stream was closed, it should be detectable
+            return hasattr(self.stream, '_closed') and not getattr(self.stream, '_closed', True)
+        except:
+            # If we can't determine the state, assume it needs recreation
+            return False
+
     async def initialize_stream(self):
         """Create the ingest stream to the Delta table."""
         try:
+            # Close existing stream if it exists
+            if self.stream:
+                try:
+                    await self.stream.close()
+                    self.logger.debug("Closed existing stream before reinitializing")
+                except:
+                    pass  # Ignore errors when closing potentially broken stream
+
             self.stream = await self.sdk.create_stream(self.table_properties)
             self.logger.info(f"Initialized stream to table: {self.table_name}")
         except Exception as e:
             self.logger.error(f"Failed to initialize stream: {e}")
+            self.stream = None
             raise
 
     async def forward_event(self, salesforce_event_data: dict, org_id: str, payload_binary: bytes = None, schema_json: str = None):
@@ -64,7 +88,9 @@ class DatabricksForwarder:
             payload_binary: Raw Avro binary payload from Salesforce (optional)
             schema_json: Avro schema JSON string for parsing (optional)
         """
-        if not self.stream:
+        # Check if stream needs initialization or recreation
+        if not self._is_stream_active():
+            self.logger.info("Stream not active, initializing/recreating stream")
             await self.initialize_stream()
 
         try:
@@ -114,8 +140,30 @@ class DatabricksForwarder:
                 processed_timestamp=int(time.time() * 1000),
             )
 
-            # Ingest the record
-            await self.stream.ingest_record(pb_event)
+            # Ingest the record with retry logic
+            max_retries = 3
+            last_exception = None
+
+            for attempt in range(max_retries):
+                try:
+                    await self.stream.ingest_record(pb_event)
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_exception = e
+                    error_msg = str(e).lower()
+
+                    # Check if this is a stream closure error
+                    if "closed" in error_msg or "stream" in error_msg:
+                        self.logger.warning(f"Stream error on attempt {attempt + 1}: {e}")
+
+                        if attempt < max_retries - 1:  # Not the last attempt
+                            self.logger.info("Recreating stream and retrying...")
+                            await self.initialize_stream()
+                            continue
+
+                    # For other errors or final attempt, re-raise
+                    if attempt == max_retries - 1:
+                        raise e
 
             # Log successful forward
             record_id = record_ids[0] if record_ids else "unknown"
@@ -124,7 +172,11 @@ class DatabricksForwarder:
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to forward event to Databricks: {e}")
+            self.logger.error(f"Failed to forward event to Databricks after {max_retries} attempts: {e}")
+            # Check if stream should be reset for next attempt
+            if "closed" in str(e).lower() or "stream" in str(e).lower():
+                self.logger.warning("Marking stream as inactive due to persistent errors")
+                self.stream = None
             # Re-raise to allow caller to handle
             raise
 
@@ -136,6 +188,10 @@ class DatabricksForwarder:
                 self.logger.debug("Flushed pending records to Databricks")
             except Exception as e:
                 self.logger.error(f"Failed to flush records: {e}")
+                # Check if this is a stream closure error
+                if "closed" in str(e).lower() or "stream" in str(e).lower():
+                    self.logger.warning("Stream appears closed, marking for recreation")
+                    self.stream = None
                 raise
 
     async def close(self):
@@ -143,11 +199,12 @@ class DatabricksForwarder:
         if self.stream:
             try:
                 await self.stream.close()
-                self.logger.info("Closed Databricks stream")
+                self.logger.info("Successfully closed Databricks stream")
             except Exception as e:
-                self.logger.error(f"Failed to close stream: {e}")
+                self.logger.warning(f"Error while closing stream (stream may already be closed): {e}")
             finally:
                 self.stream = None
+                self.logger.debug("Stream reference cleared")
 
 
 def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
