@@ -80,7 +80,8 @@ print(
     f"Monitoring Channel:AccountChangeEvent → Databricks Table:AccountchangeEvents"
 )
 
-streamer.start()
+if __name__ == "__main__":
+    streamer.start()
 ```
 
 ### Expected Log Output
@@ -265,6 +266,18 @@ streamer = SalesforceZerobus(
     api_version="57.0"                     # Salesforce API version
 )
 ```
+## 🧱 Run as Databricks App
+Running this service as a Databricks app and subscribing to ChangeEvents is a great way to stream all Salesforce changes with low costs, simplified ci/cd, and a rich governance model. 
+View the databricks.yml to see the .whl being built. 
+1. View the contents of resources/app.yml
+2. Configure the app.yaml file variables
+3. Deploy the Databricks Asset Bundle: 
+    1. Comment out the job/pipeline .yml contents if you do not wish to deploy a job or pipeline 
+    2. terminal: ```databricks bundle deploy -t dev ```
+    3. terminal: ```databricks sync --full . /Workspace/Users/{user}/.bundle/{bundle_name}/dev/files```
+4. View the app in the databricks UI. Deploy the app. 
+5. Deploy the Lakeflow Declarative Pipeline resource to flatten and parse the streamed data
+
 ## 🧱 Run as Databricks Job
 ### Running the service as a Databricks Job
 Running this service as a Databricks job leverages the For/Each task type to ingest several Salesforce Objects in parallel. 
@@ -287,10 +300,8 @@ Works with any Salesforce object that has Change Data Capture enabled:
 #### Read Every Object Change
 - `ChangeEvents`
 
-#### Standard Objects
+#### Standard Objects ExampleL
 - `Account`, `Contact`, `Lead`, `Opportunity`, `Case`
-- `User`, `Campaign`, `Product2`, `Order`, `OrderItem`
-- `Asset`, `Contract`, `Quote`, `Task`, `Event`
 
 #### Custom Objects
 - Any custom object with CDC enabled (e.g., `CustomObject__c`)
