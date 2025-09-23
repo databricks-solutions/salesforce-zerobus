@@ -69,7 +69,7 @@ class DatabricksForwarder:
         # Configure stream options with enhanced recovery settings
         # Default to production-ready recovery configuration
         default_config = {
-            "recovery": True,  # Always enable recovery as per plan
+            "recovery": True,  # Always enable recovery
             "recovery_retries": 5,  # Increased for production resilience
             "recovery_timout_ms": 30000,  # 30 seconds per attempt
             "recovery_backoff_ms": 5000,  # 5 second backoff
@@ -97,7 +97,6 @@ class DatabricksForwarder:
         offset_id = response.durability_ack_up_to_offset
         self.logger.debug(f"Zerobus ack received up to offset: {offset_id}")
 
-
     def get_stream_health(self) -> dict:
         """Get comprehensive stream health information."""
         if not self.stream:
@@ -120,9 +119,7 @@ class DatabricksForwarder:
             self.stream = await self.sdk.create_stream(
                 self.table_properties, self.stream_config
             )
-            self.logger.info(
-                f"Initialized Zerobus stream to table: {self.table_name}"
-            )
+            self.logger.info(f"Initialized Zerobus stream to table: {self.table_name}")
         except Exception as e:
             self.logger.error(f"Failed to initialize Zerobus stream: {e}")
             self.stream = None
@@ -166,8 +163,13 @@ class DatabricksForwarder:
 
         # Extract record data (exclude metadata fields)
         excluded_keys = [
-            "ChangeEventHeader", "event_id", "schema_id", "replay_id",
-            "converted_changed_fields", "converted_nulled_fields", "converted_diff_fields",
+            "ChangeEventHeader",
+            "event_id",
+            "schema_id",
+            "replay_id",
+            "converted_changed_fields",
+            "converted_nulled_fields",
+            "converted_diff_fields",
         ]
         record_data = {
             k: v for k, v in salesforce_event_data.items() if k not in excluded_keys
@@ -208,8 +210,14 @@ class DatabricksForwarder:
             # Only handle non-recoverable errors - SDK handles recoverable ones automatically
             self.logger.error(f"Non-recoverable Zerobus error: {e}")
             # For non-recoverable errors, we may need to recreate the stream manually
-            if "schema" in str(e).lower() or "permission" in str(e).lower() or "authentication" in str(e).lower():
-                self.logger.warning("Non-recoverable error detected - may require stream recreation")
+            if (
+                "schema" in str(e).lower()
+                or "permission" in str(e).lower()
+                or "authentication" in str(e).lower()
+            ):
+                self.logger.warning(
+                    "Non-recoverable error detected - may require stream recreation"
+                )
                 self.stream = None
             raise
 
