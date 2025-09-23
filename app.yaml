@@ -23,3 +23,15 @@ env:
     value: ''
   - name: 'DATABRICKS_SQL_API_TOKEN' # Optional
     value: ''
+  # - name: 'ZEROBUS_FLUSH_TIMEOUT_MS' # Optional
+  #   value: '900000'
+  # - name: 'ZEROBUS_SERVER_ACK_TIMEOUT_MS' # Optional
+  #   value: '120000'
+  # - name: 'ZEROBUS_RECOVERY_RETRIES' # Optional
+  #   value: '5'
+  # - name: 'ZEROBUS_RECOVERY_TIMOUT_MS' # Optional
+  #   value: '10000'
+  # - name: 'ZEROBUS_RECOVERY_BACKOFF_MS' # Optional
+  #   value: '3000'
+  # - name: 'ZEROBUS_MAX_INFLIGHT_RECORDS' # Optional
+  #   value: '75000'
