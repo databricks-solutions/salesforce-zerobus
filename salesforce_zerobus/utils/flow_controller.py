@@ -76,10 +76,17 @@ class FlowController:
                 self.consecutive_timeouts += 1
                 self.total_timeouts += 1
             
-            self.logger.warning(
-                f"Semaphore acquire timeout #{self.consecutive_timeouts} "
-                f"(waited {effective_timeout}s). Stream may be stuck."
-            )
+            # Only warn after multiple timeouts - single timeouts are normal for idle streams
+            if self.consecutive_timeouts >= 2:
+                self.logger.warning(
+                    f"Multiple semaphore timeouts #{self.consecutive_timeouts} "
+                    f"(waited {effective_timeout}s). Stream may be experiencing issues."
+                )
+            else:
+                self.logger.debug(
+                    f"Semaphore acquire timeout #{self.consecutive_timeouts} "
+                    f"(waited {effective_timeout}s). Normal for idle streams."
+                )
             
             # Attempt recovery if too many consecutive timeouts
             if self.consecutive_timeouts >= self.max_consecutive_timeouts:

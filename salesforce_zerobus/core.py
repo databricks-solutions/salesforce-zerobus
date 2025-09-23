@@ -501,7 +501,8 @@ class SalesforceZerobus:
             self.logger.info(f"Starting subscription to {self.topic}")
             self.logger.info(f"Batch size: {self.batch_size}, Mode: {replay_type}")
 
-            # Start streaming (blocks here)
+            # Start streaming with robust error handling and retry logic
+            # The updated subscribe method now handles RST_STREAM and other gRPC errors automatically
             self._pubsub_client.subscribe(
                 self.topic,
                 replay_type,
@@ -511,16 +512,46 @@ class SalesforceZerobus:
             )
 
         except KeyboardInterrupt:
-            self.logger.info("Shutting down...")
+            self.logger.info("Shutting down gracefully...")
         except Exception as e:
-            self.logger.error(f"Streaming error: {e}")
+            # Enhanced error logging with more context
+            import traceback
+            self.logger.error(f"Critical streaming error: {e}")
+            self.logger.error(f"Error type: {type(e).__name__}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Check if this is a gRPC error and log additional details
+            if hasattr(e, 'code') and hasattr(e, 'details'):
+                self.logger.error(f"gRPC Status Code: {e.code()}")
+                self.logger.error(f"gRPC Details: {e.details()}")
+
+            # Re-raise to allow higher-level error handling
             raise
         finally:
             self.running = False
+            self.logger.info("Cleaning up resources...")
+
+            # Close gRPC channel properly
+            if hasattr(self, "_pubsub_client") and hasattr(self._pubsub_client, "channel"):
+                try:
+                    self._pubsub_client.channel.close()
+                    self.logger.info("gRPC channel closed successfully")
+                except Exception as e:
+                    self.logger.warning(f"Error closing gRPC channel: {e}")
+
+            # Stop background loop and wait for async thread
             if hasattr(self, "background_loop"):
-                self.background_loop.call_soon_threadsafe(self.background_loop.stop)
+                try:
+                    self.background_loop.call_soon_threadsafe(self.background_loop.stop)
+                except RuntimeError:
+                    # Loop may already be stopped
+                    pass
             if hasattr(self, "async_thread"):
                 self.async_thread.join(timeout=5)
+                if self.async_thread.is_alive():
+                    self.logger.warning("Background thread did not stop within timeout")
+
+            self.logger.info("Cleanup completed")
 
     async def _run_background_tasks(self):
         """Run background async tasks (event processing and health monitoring only)."""

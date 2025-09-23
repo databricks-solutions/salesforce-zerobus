@@ -27,6 +27,7 @@ MANIFEST
 uv.lock
 databricks_zerobus*
 unpacked_wheel/*
+links.md
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
