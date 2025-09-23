@@ -75,6 +75,13 @@ class SalesforceZerobus:
         # New table management parameters
         auto_create_table: bool = True,
         backfill_historical: bool = True,
+        # Zerobus SDK recovery configuration
+        zerobus_max_inflight_records: int = 50000,
+        zerobus_recovery_retries: int = 5,
+        zerobus_recovery_timeout_ms: int = 30000,
+        zerobus_recovery_backoff_ms: int = 5000,
+        zerobus_server_ack_timeout_ms: int = 60000,
+        zerobus_flush_timeout_ms: int = 300000,
         # Backward compatibility
         sf_object: Optional[str] = None,
     ):
@@ -95,6 +102,12 @@ class SalesforceZerobus:
             api_version: Salesforce API version (default: 57.0)
             auto_create_table: Auto-create Databricks table if it doesn't exist (default: True)
             backfill_historical: Start from EARLIEST for new tables to get historical data (default: True)
+            zerobus_max_inflight_records: Max records in flight for Databricks ingestion (default: 50000)
+            zerobus_recovery_retries: Number of Zerobus recovery attempts (default: 5)
+            zerobus_recovery_timeout_ms: Zerobus recovery timeout per attempt in ms (default: 30000)
+            zerobus_recovery_backoff_ms: Zerobus recovery backoff between attempts in ms (default: 5000)
+            zerobus_server_ack_timeout_ms: Zerobus server unresponsive timeout in ms (default: 60000)
+            zerobus_flush_timeout_ms: Zerobus stream flush timeout in ms (default: 300000)
             sf_object: [DEPRECATED] Use sf_object_channel instead
         """
         # Handle backward compatibility and new parameter
@@ -137,6 +150,16 @@ class SalesforceZerobus:
         self.api_version = api_version
         self.auto_create_table = auto_create_table
         self.backfill_historical = backfill_historical
+
+        # Store Zerobus SDK recovery configuration
+        self.zerobus_config = {
+            "max_inflight_records": zerobus_max_inflight_records,
+            "recovery_retries": zerobus_recovery_retries,
+            "recovery_timout_ms": zerobus_recovery_timeout_ms,
+            "recovery_backoff_ms": zerobus_recovery_backoff_ms,
+            "server_lack_of_ack_timeout_ms": zerobus_server_ack_timeout_ms,
+            "flush_timeout_ms": zerobus_flush_timeout_ms,
+        }
 
         # Use the channel name directly for topic
         self.topic = f"/data/{sf_object_channel}"
@@ -221,12 +244,13 @@ class SalesforceZerobus:
         self._pubsub_client = PubSub(pubsub_args)
         self._pubsub_client.set_flow_controller(self._flow_controller)
 
-        # Initialize Databricks forwarder
+        # Initialize Databricks forwarder with Zerobus recovery configuration
         self._databricks_forwarder = DatabricksForwarder(
             ingest_endpoint=self.databricks_auth["ingest_endpoint"],
             workspace_url=self.databricks_auth["workspace_url"],
             api_token=self.databricks_auth["api_token"],
             table_name=self.databricks_table,
+            stream_config_options=self.zerobus_config,
         )
 
         # Initialize replay manager if enabled
@@ -402,7 +426,7 @@ class SalesforceZerobus:
                         self.event_queue.put(event_package)
 
                     except Exception as e:
-                        self.logger.error(f"Error processing event: {e}")
+                        self.logger.error(f"Salesforce event processing error: {e}")
             else:
                 self.logger.debug("Keepalive message received")
 
@@ -423,21 +447,42 @@ class SalesforceZerobus:
             try:
                 if not self.event_queue.empty():
                     event_package = self.event_queue.get_nowait()
-                    await self._databricks_forwarder.forward_event(
-                        event_package["decoded_event"],
-                        self.org_id,
-                        event_package["payload_binary"],
-                        event_package["schema_json"],
-                    )
-                    self.event_queue.task_done()
+
+                    try:
+                        # Forward event - Zerobus SDK handles recovery automatically
+                        await self._databricks_forwarder.forward_event(
+                            event_package["decoded_event"],
+                            self.org_id,
+                            event_package["payload_binary"],
+                            event_package["schema_json"],
+                        )
+                        self.event_queue.task_done()
+
+                    except Exception as e:
+                        # Log forwarding errors - most recovery is handled by Zerobus SDK
+                        self.logger.error(f"Failed to forward event to Databricks: {e}")
+
+                        # Check for configuration-related errors that need attention
+                        error_str = str(e).lower()
+                        if any(keyword in error_str for keyword in ["permission", "authentication", "schema", "table"]):
+                            self.logger.warning(
+                                "Configuration-related error detected - may require manual intervention"
+                            )
+
+                        # Mark task done to prevent queue backup
+                        self.event_queue.task_done()
+
+                        # Brief pause to avoid tight error loops
+                        await asyncio.sleep(1)
                 else:
                     await asyncio.sleep(0.1)
+
             except Exception as e:
-                self.logger.error(f"Error processing event queue: {e}")
+                self.logger.error(f"Critical error in event queue processing: {e}")
                 await asyncio.sleep(1)
 
     async def _health_monitor(self):
-        """Monitor health and log statistics."""
+        """Monitor health and log statistics for both recovery layers."""
         last_report = time.time()
         report_interval = 300  # 5 minutes
 
@@ -445,7 +490,7 @@ class SalesforceZerobus:
             try:
                 current_time = time.time()
                 if current_time - last_report >= report_interval:
-                    # Log health statistics
+                    # Log Salesforce flow control health
                     self._flow_controller.log_health_report()
 
                     # Check queue health
@@ -456,6 +501,22 @@ class SalesforceZerobus:
                         )
                     elif queue_size > 0:
                         self.logger.info(f"Queue status: {queue_size} events pending")
+
+                    # Check Zerobus stream health if available
+                    if self._databricks_forwarder:
+                        try:
+                            zerobus_health = self._databricks_forwarder.get_stream_health()
+                            # Only log if unhealthy or on debug level
+                            if not zerobus_health["healthy"]:
+                                self.logger.warning(
+                                    f"Zerobus stream unhealthy: {zerobus_health['status']}"
+                                )
+                            else:
+                                self.logger.debug(
+                                    f"Zerobus stream healthy: {zerobus_health['status']}"
+                                )
+                        except Exception as e:
+                            self.logger.debug(f"Could not check Zerobus stream health: {e}")
 
                     last_report = current_time
 
@@ -668,7 +729,7 @@ class SalesforceZerobus:
         return False
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get current streaming statistics."""
+        """Get current streaming statistics including both recovery layers."""
         stats = {
             "sf_object_channel": self.sf_object_channel,
             "sf_object": self.sf_object,
@@ -679,7 +740,24 @@ class SalesforceZerobus:
             "org_id": self.org_id,
         }
 
+        # Add Salesforce flow controller stats
         if self._flow_controller:
-            stats.update(self._flow_controller.get_health_status())
+            flow_stats = self._flow_controller.get_health_status()
+            # Prefix flow controller stats for clarity
+            for key, value in flow_stats.items():
+                stats[f"salesforce_{key}"] = value
+
+        # Add Zerobus stream health stats
+        if self._databricks_forwarder:
+            try:
+                zerobus_health = self._databricks_forwarder.get_stream_health()
+                # Prefix Zerobus stats for clarity
+                for key, value in zerobus_health.items():
+                    stats[f"zerobus_{key}"] = value
+            except Exception as e:
+                stats["zerobus_health_error"] = str(e)
+
+        # Add Zerobus configuration
+        stats["zerobus_config"] = self.zerobus_config.copy()
 
         return stats

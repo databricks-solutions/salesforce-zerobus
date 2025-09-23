@@ -23,6 +23,9 @@ from ..pubsub.proto import salesforce_events_pb2
 class DatabricksForwarder:
     """
     Forwards Salesforce Change Data Capture events to Databricks Delta tables.
+
+    Leverages the Zerobus SDK's automatic recovery capabilities for maximum reliability.
+    The SDK handles stream recreation, error recovery, and unacknowledged record replay.
     """
 
     def __init__(
@@ -42,14 +45,15 @@ class DatabricksForwarder:
             api_token: Databricks API token
             table_name: Target Delta table name
             stream_config_options: Optional dict of ZerobusSdk stream configuration options
-                Available options:
+                Available options (recovery is always enabled):
                 - max_inflight_records (int): Max records in flight (default: 50,000)
-                - recovery (bool): Enable automatic recovery (default: True)
-                - recovery_retries (int): Number of recovery attempts (default: 3)
-                - recovery_timeout_ms (int): Recovery timeout per attempt (default: 7,000ms)
-                - recovery_backoff_ms (int): Backoff between attempts (default: 2,000ms)
+                - recovery_retries (int): Number of recovery attempts (default: 5)
+                - recovery_timeout_ms (int): Recovery timeout per attempt (default: 30,000ms)
+                - recovery_backoff_ms (int): Backoff between attempts (default: 5,000ms)
                 - server_lack_of_ack_timeout_ms (int): Server unresponsive timeout (default: 60,000ms)
                 - flush_timeout_ms (int): Stream flush timeout (default: 300,000ms)
+                - ack_callback (callable): Acknowledgment callback function (default: debug logging)
+                Note: recovery is always True for maximum reliability
         """
         self.ingest_endpoint = ingest_endpoint
         self.workspace_url = workspace_url
@@ -62,22 +66,37 @@ class DatabricksForwarder:
             table_name, salesforce_events_pb2.SalesforceEvent.DESCRIPTOR
         )
 
-        # Configure stream options
-        self.stream_config = StreamConfigurationOptions(**(stream_config_options or {}))
+        # Configure stream options with enhanced recovery settings
+        # Default to production-ready recovery configuration
+        default_config = {
+            "recovery": True,  # Always enable recovery as per plan
+            "recovery_retries": 5,  # Increased for production resilience
+            "recovery_timout_ms": 30000,  # 30 seconds per attempt
+            "recovery_backoff_ms": 5000,  # 5 second backoff
+            "server_lack_of_ack_timeout_ms": 60000,  # 60 seconds server timeout
+            "max_inflight_records": 50000,  # Default batch size
+        }
+
+        # Merge user-provided options with defaults (user options take precedence)
+        final_config = {**default_config, **(stream_config_options or {})}
+
+        # Force recovery to always be True as per plan
+        final_config["recovery"] = True
+
+        # Add optional acknowledgment callback for monitoring (if not provided)
+        if "ack_callback" not in final_config:
+            final_config["ack_callback"] = self._default_ack_callback
+
+        self.stream_config = StreamConfigurationOptions(**final_config)
 
         self.stream = None
         self.logger = logging.getLogger(__name__)
 
-    def _is_stream_healthy(self) -> bool:
-        """Check if the stream is in a healthy state for ingestion."""
-        if not self.stream:
-            return False
+    def _default_ack_callback(self, response):
+        """Default acknowledgment callback for monitoring ingestion progress."""
+        offset_id = response.durability_ack_up_to_offset
+        self.logger.debug(f"Zerobus ack received up to offset: {offset_id}")
 
-        try:
-            state = self.stream.get_state()
-            return state in [StreamState.OPENED, StreamState.RECOVERING]
-        except Exception:
-            return False
 
     def get_stream_health(self) -> dict:
         """Get comprehensive stream health information."""
@@ -98,22 +117,14 @@ class DatabricksForwarder:
     async def initialize_stream(self):
         """Create the ingest stream to the Delta table."""
         try:
-            # Close existing stream if it exists
-            if self.stream:
-                try:
-                    await self.stream.close()
-                    self.logger.debug("Closed existing stream before reinitializing")
-                except Exception:
-                    pass  # Ignore errors when closing potentially broken stream
-
             self.stream = await self.sdk.create_stream(
                 self.table_properties, self.stream_config
             )
             self.logger.info(
-                f"Initialized stream to table: {self.table_name} with custom configuration"
+                f"Initialized Zerobus stream to table: {self.table_name}"
             )
         except Exception as e:
-            self.logger.error(f"Failed to initialize stream: {e}")
+            self.logger.error(f"Failed to initialize Zerobus stream: {e}")
             self.stream = None
             raise
 
@@ -127,115 +138,84 @@ class DatabricksForwarder:
         """
         Convert Salesforce CDC event to protobuf and forward to Databricks.
 
+        The Zerobus SDK handles automatic recovery, stream recreation, and error handling.
+        This method focuses purely on data transformation and ingestion.
+
         Args:
             salesforce_event_data: Decoded Salesforce event data
             org_id: Salesforce organization ID
             payload_binary: Raw Avro binary payload from Salesforce (optional)
             schema_json: Avro schema JSON string for parsing (optional)
         """
-        # Check if we need to recreate the stream
-        if not self._is_stream_healthy():
-            if self.stream and hasattr(self.stream, "get_state"):
-                state = self.stream.get_state()
-                if state in [StreamState.FAILED, StreamState.CLOSED]:
-                    self.logger.info("Recreating failed/closed stream using SDK method")
-                    self.stream = await self.sdk.recreate_stream(self.stream)
-                else:
-                    self.logger.info("Initializing new stream")
-                    await self.initialize_stream()
-            else:
-                self.logger.info("Creating initial stream")
-                await self.initialize_stream()
+        # Initialize stream if not already created
+        if not self.stream:
+            await self.initialize_stream()
+
+        # Extract event data
+        event_id = salesforce_event_data.get("event_id", "")
+        schema_id = salesforce_event_data.get("schema_id", "")
+        replay_id = salesforce_event_data.get("replay_id", "")
+        change_header = salesforce_event_data.get("ChangeEventHeader", {})
+        change_type = change_header.get("changeType", "UNKNOWN")
+        entity_name = change_header.get("entityName", "UNKNOWN")
+        change_origin = change_header.get("changeOrigin", "")
+        record_ids = change_header.get("recordIds", [])
+        changed_fields = salesforce_event_data.get("converted_changed_fields", [])
+        nulled_fields = salesforce_event_data.get("converted_nulled_fields", [])
+        diff_fields = salesforce_event_data.get("converted_diff_fields", [])
+
+        # Extract record data (exclude metadata fields)
+        excluded_keys = [
+            "ChangeEventHeader", "event_id", "schema_id", "replay_id",
+            "converted_changed_fields", "converted_nulled_fields", "converted_diff_fields",
+        ]
+        record_data = {
+            k: v for k, v in salesforce_event_data.items() if k not in excluded_keys
+        }
+        record_data_json = json.dumps(record_data)
+
+        # Create protobuf message
+        pb_event = salesforce_events_pb2.SalesforceEvent(
+            event_id=event_id,
+            schema_id=schema_id,
+            replay_id=replay_id,
+            timestamp=int(time.time() * 1000),
+            change_type=change_type,
+            entity_name=entity_name,
+            change_origin=change_origin,
+            record_ids=record_ids,
+            changed_fields=changed_fields,
+            nulled_fields=nulled_fields,
+            diff_fields=diff_fields,
+            record_data_json=record_data_json,
+            payload_binary=payload_binary if payload_binary is not None else b"",
+            schema_json=schema_json if schema_json is not None else "",
+            org_id=org_id,
+            processed_timestamp=int(time.time() * 1000),
+        )
 
         try:
-            event_id = salesforce_event_data.get("event_id", "")
-            schema_id = salesforce_event_data.get("schema_id", "")
-            replay_id = salesforce_event_data.get("replay_id", "")
-            change_header = salesforce_event_data.get("ChangeEventHeader", {})
-            change_type = change_header.get("changeType", "UNKNOWN")
-            entity_name = change_header.get("entityName", "UNKNOWN")
-            change_origin = change_header.get("changeOrigin", "")
-            record_ids = change_header.get("recordIds", [])
-            changed_fields = salesforce_event_data.get("converted_changed_fields", [])
-            nulled_fields = salesforce_event_data.get("converted_nulled_fields", [])
-            diff_fields = salesforce_event_data.get("converted_diff_fields", [])
+            # Ingest the record - SDK handles all recovery automatically
+            await self.stream.ingest_record(pb_event)
 
-            excluded_keys = [
-                "ChangeEventHeader",
-                "event_id",
-                "schema_id",
-                "replay_id",
-                "converted_changed_fields",
-                "converted_nulled_fields",
-                "converted_diff_fields",
-            ]
-            record_data = {
-                k: v for k, v in salesforce_event_data.items() if k not in excluded_keys
-            }
-            record_data_json = json.dumps(record_data)
-
-            # Create protobuf message
-            pb_event = salesforce_events_pb2.SalesforceEvent(
-                event_id=event_id,
-                schema_id=schema_id,
-                replay_id=replay_id,
-                timestamp=int(time.time() * 1000),  # Current timestamp in milliseconds
-                change_type=change_type,
-                entity_name=entity_name,
-                change_origin=change_origin,
-                record_ids=record_ids,
-                changed_fields=changed_fields,
-                nulled_fields=nulled_fields,
-                diff_fields=diff_fields,
-                record_data_json=record_data_json,
-                payload_binary=payload_binary if payload_binary is not None else b"",
-                schema_json=schema_json if schema_json is not None else "",
-                org_id=org_id,
-                processed_timestamp=int(time.time() * 1000),
-            )
-
-            # Ingest the record - let SDK handle recovery automatically
-            try:
-                await self.stream.ingest_record(pb_event)
-            except ZerobusException as e:
-                # Check if this is a stream-related error that needs manual recreation
-                if "closed" in str(e).lower() or "before it's opened" in str(e).lower():
-                    self.logger.warning(f"Stream error detected: {e}")
-
-                    # Recreate stream using SDK method if possible
-                    if hasattr(self.stream, "get_state"):
-                        state = self.stream.get_state()
-                        if state in [StreamState.FAILED, StreamState.CLOSED]:
-                            self.logger.info("Using SDK recreate_stream method")
-                            self.stream = await self.sdk.recreate_stream(self.stream)
-                        else:
-                            self.logger.info("Reinitializing stream")
-                            await self.initialize_stream()
-                    else:
-                        self.logger.info("Reinitializing stream")
-                        await self.initialize_stream()
-
-                    # Retry once with new stream
-                    await self.stream.ingest_record(pb_event)
-                else:
-                    # Re-raise non-stream-related errors
-                    raise
-
-            # Log successful forward
+            # Log successful ingestion
             record_id = record_ids[0] if record_ids else "unknown"
             self.logger.info(
-                f"Written to Databricks: {self.table_name} - {entity_name} {change_type} {record_id}"
+                f"Ingested to Databricks: {self.table_name} - {entity_name} {change_type} {record_id}"
             )
 
-        except Exception as e:
-            self.logger.error(f"Failed to forward event to Databricks: {e}")
-            # Check if stream should be reset for next attempt
-            if "closed" in str(e).lower() or "stream" in str(e).lower():
-                self.logger.warning(
-                    "Marking stream as inactive due to persistent errors"
-                )
+        except ZerobusException as e:
+            # Only handle non-recoverable errors - SDK handles recoverable ones automatically
+            self.logger.error(f"Non-recoverable Zerobus error: {e}")
+            # For non-recoverable errors, we may need to recreate the stream manually
+            if "schema" in str(e).lower() or "permission" in str(e).lower() or "authentication" in str(e).lower():
+                self.logger.warning("Non-recoverable error detected - may require stream recreation")
                 self.stream = None
-            # Re-raise to allow caller to handle
+            raise
+
+        except Exception as e:
+            # Handle unexpected errors
+            self.logger.error(f"Unexpected error forwarding event to Databricks: {e}")
             raise
 
     async def flush(self):
@@ -246,10 +226,6 @@ class DatabricksForwarder:
                 self.logger.debug("Flushed pending records to Databricks")
             except Exception as e:
                 self.logger.error(f"Failed to flush records: {e}")
-                # Check if this is a stream closure error
-                if "closed" in str(e).lower() or "stream" in str(e).lower():
-                    self.logger.warning("Stream appears closed, marking for recreation")
-                    self.stream = None
                 raise
 
     async def close(self):
@@ -257,14 +233,11 @@ class DatabricksForwarder:
         if self.stream:
             try:
                 await self.stream.close()
-                self.logger.info("Successfully closed Databricks stream")
+                self.logger.info("Successfully closed Zerobus stream")
             except Exception as e:
-                self.logger.warning(
-                    f"Error while closing stream (stream may already be closed): {e}"
-                )
+                self.logger.warning(f"Error while closing stream: {e}")
             finally:
                 self.stream = None
-                self.logger.debug("Stream reference cleared")
 
 
 def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
@@ -287,11 +260,11 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
         - DATABRICKS_API_TOKEN: Databricks API token
         - DATABRICKS_TABLE_NAME: Target table name (if table_name param not provided)
 
-        Optional ZerobusSdk Stream Configuration:
+        Optional ZerobusSdk Stream Configuration (recovery always enabled):
         - ZEROBUS_MAX_INFLIGHT_RECORDS: Max records in flight (default: 50000)
-        - ZEROBUS_RECOVERY_RETRIES: Recovery attempt count (default: 3)
-        - ZEROBUS_RECOVERY_TIMEOUT_MS: Recovery timeout per attempt (default: 7000)
-        - ZEROBUS_RECOVERY_BACKOFF_MS: Backoff between attempts (default: 2000)
+        - ZEROBUS_RECOVERY_RETRIES: Recovery attempt count (default: 5)
+        - ZEROBUS_RECOVERY_TIMEOUT_MS: Recovery timeout per attempt (default: 30000)
+        - ZEROBUS_RECOVERY_BACKOFF_MS: Backoff between attempts (default: 5000)
         - ZEROBUS_SERVER_ACK_TIMEOUT_MS: Server unresponsive timeout (default: 60000)
         - ZEROBUS_FLUSH_TIMEOUT_MS: Stream flush timeout (default: 300000)
     """
