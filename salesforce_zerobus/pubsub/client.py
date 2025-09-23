@@ -30,7 +30,9 @@ with open(certifi.where(), "rb") as f:
     secure_channel_credentials = grpc.ssl_channel_credentials(f.read())
 
 
-class ClientTraceInterceptor(grpc.UnaryUnaryClientInterceptor, grpc.StreamStreamClientInterceptor):
+class ClientTraceInterceptor(
+    grpc.UnaryUnaryClientInterceptor, grpc.StreamStreamClientInterceptor
+):
     """
     gRPC interceptor to add client trace ID for debugging as per Salesforce documentation.
     """
@@ -42,11 +44,13 @@ class ClientTraceInterceptor(grpc.UnaryUnaryClientInterceptor, grpc.StreamStream
         """Add unique trace ID to request metadata."""
         trace_id = str(uuid.uuid4())
         metadata = list(client_call_details.metadata or [])
-        metadata.append(('x-client-trace-id', trace_id))
+        metadata.append(("x-client-trace-id", trace_id))
 
         new_call_details = client_call_details._replace(metadata=metadata)
 
-        self.logger.debug(f"Request start - Trace ID: {trace_id}, Method: {client_call_details.method}")
+        self.logger.debug(
+            f"Request start - Trace ID: {trace_id}, Method: {client_call_details.method}"
+        )
         return new_call_details, trace_id
 
     def intercept_unary_unary(self, continuation, client_call_details, request):
@@ -61,16 +65,22 @@ class ClientTraceInterceptor(grpc.UnaryUnaryClientInterceptor, grpc.StreamStream
             self.logger.error(f"Request failed - Trace ID: {trace_id}, Error: {e}")
             raise
 
-    def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
+    def intercept_stream_stream(
+        self, continuation, client_call_details, request_iterator
+    ):
         """Intercept stream-stream calls to add trace ID."""
-        new_call_details, trace_id = self._add_trace_id(client_call_details, request_iterator)
+        new_call_details, trace_id = self._add_trace_id(
+            client_call_details, request_iterator
+        )
 
         try:
             response_iterator = continuation(new_call_details, request_iterator)
             self.logger.debug(f"Streaming request started - Trace ID: {trace_id}")
             return response_iterator
         except Exception as e:
-            self.logger.error(f"Streaming request failed - Trace ID: {trace_id}, Error: {e}")
+            self.logger.error(
+                f"Streaming request failed - Trace ID: {trace_id}, Error: {e}"
+            )
             raise
 
 
@@ -124,17 +134,37 @@ class PubSub(object):
 
         # Configure gRPC channel with keepalive settings optimized for long-lived streaming
         channel_options = [
-            ('grpc.keepalive_time_ms', 60000),  # Send keepalive every 60 seconds (less aggressive)
-            ('grpc.keepalive_timeout_ms', 10000),  # Wait 10 seconds for keepalive response
-            ('grpc.keepalive_permit_without_calls', True),  # Allow keepalive on idle connections
-            ('grpc.http2.max_pings_without_data', 0),  # Unlimited pings without data
-            ('grpc.http2.min_time_between_pings_ms', 30000),  # Min 30 seconds between pings
-            ('grpc.http2.min_ping_interval_without_data_ms', 300000),  # 5 minutes without data before ping
-            ('grpc.max_connection_idle_ms', 1800000),  # Keep connection for 30 minutes when idle
+            (
+                "grpc.keepalive_time_ms",
+                60000,
+            ),  # Send keepalive every 60 seconds (less aggressive)
+            (
+                "grpc.keepalive_timeout_ms",
+                10000,
+            ),  # Wait 10 seconds for keepalive response
+            (
+                "grpc.keepalive_permit_without_calls",
+                True,
+            ),  # Allow keepalive on idle connections
+            ("grpc.http2.max_pings_without_data", 0),  # Unlimited pings without data
+            (
+                "grpc.http2.min_time_between_pings_ms",
+                30000,
+            ),  # Min 30 seconds between pings
+            (
+                "grpc.http2.min_ping_interval_without_data_ms",
+                300000,
+            ),  # 5 minutes without data before ping
+            (
+                "grpc.max_connection_idle_ms",
+                1800000,
+            ),  # Keep connection for 30 minutes when idle
         ]
 
         # Create channel with trace interceptor
-        channel = grpc.secure_channel(pubsub_url, secure_channel_credentials, options=channel_options)
+        channel = grpc.secure_channel(
+            pubsub_url, secure_channel_credentials, options=channel_options
+        )
 
         # Add client trace ID interceptor as per Salesforce documentation
         trace_interceptor = ClientTraceInterceptor(self.logger)
@@ -197,8 +227,12 @@ class PubSub(object):
             if len(self._processed_event_ids) >= self._max_event_ids_cache:
                 # Convert to list, remove first half, convert back to set
                 event_ids_list = list(self._processed_event_ids)
-                self._processed_event_ids = set(event_ids_list[len(event_ids_list)//2:])
-                self.logger.debug(f"Event ID cache trimmed to {len(self._processed_event_ids)} entries")
+                self._processed_event_ids = set(
+                    event_ids_list[len(event_ids_list) // 2 :]
+                )
+                self.logger.debug(
+                    f"Event ID cache trimmed to {len(self._processed_event_ids)} entries"
+                )
 
             self._processed_event_ids.add(event_id)
             self.logger.debug(f"Marked event {event_id} as processed")
@@ -225,15 +259,19 @@ class PubSub(object):
             raise ValueError("Tenant ID (Organization ID) is required")
 
         # Validate URL format
-        if not (self.url.startswith('https://') or self.url.startswith('http://')):
+        if not (self.url.startswith("https://") or self.url.startswith("http://")):
             self.logger.warning(f"Instance URL should use HTTPS: {self.url}")
 
         # Validate Org ID format (15 or 18 character Salesforce ID)
         if len(self.tenant_id) not in [15, 18]:
-            self.logger.warning(f"Tenant ID format may be invalid (should be 15 or 18 chars): {self.tenant_id}")
+            self.logger.warning(
+                f"Tenant ID format may be invalid (should be 15 or 18 chars): {self.tenant_id}"
+            )
 
         # Log successful validation
-        self.logger.debug(f"Authentication headers validated: org={self.tenant_id}, url={self.url}")
+        self.logger.debug(
+            f"Authentication headers validated: org={self.tenant_id}, url={self.url}"
+        )
 
     def _is_retryable_error(self, e):
         """
@@ -253,7 +291,9 @@ class PubSub(object):
             return status_code in retryable_codes
         return False
 
-    def _determine_retry_strategy(self, error, last_processed_replay_id, original_replay_type, original_replay_id):
+    def _determine_retry_strategy(
+        self, error, last_processed_replay_id, original_replay_type, original_replay_id
+    ):
         """
         Determine the appropriate retry strategy based on Salesforce documentation.
         Returns tuple of (replay_type, replay_id) or None if non-retryable.
@@ -262,11 +302,15 @@ class PubSub(object):
             return None
 
         status_code = error.code()
-        error_details = error.details() if hasattr(error, 'details') else ""
+        error_details = error.details() if hasattr(error, "details") else ""
 
         # Convert bytes replay ID to hex for logging
-        replay_id_display = last_processed_replay_id.hex() if last_processed_replay_id else "None"
-        self.logger.info(f"Determining retry strategy for error: {status_code}, details: {error_details}, last_replay_id: {replay_id_display}")
+        replay_id_display = (
+            last_processed_replay_id.hex() if last_processed_replay_id else "None"
+        )
+        self.logger.info(
+            f"Determining retry strategy for error: {status_code}, details: {error_details}, last_replay_id: {replay_id_display}"
+        )
 
         # Non-retryable errors
         non_retryable_codes = [
@@ -285,24 +329,44 @@ class PubSub(object):
 
         # Authentication errors - retry with original parameters after refresh
         if status_code == grpc.StatusCode.UNAUTHENTICATED:
-            self.logger.info("Authentication error - will refresh token and retry with original parameters")
+            self.logger.info(
+                "Authentication error - will refresh token and retry with original parameters"
+            )
             return (original_replay_type, original_replay_id)
 
         # Temporary server errors - use CUSTOM with last processed replay ID if available
-        if status_code in [grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INTERNAL, grpc.StatusCode.ABORTED]:
+        if status_code in [
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.StatusCode.INTERNAL,
+            grpc.StatusCode.ABORTED,
+        ]:
             if last_processed_replay_id:
-                replay_display = last_processed_replay_id.hex() if isinstance(last_processed_replay_id, bytes) else last_processed_replay_id
-                self.logger.info(f"Temporary server error - retrying with CUSTOM replay from last processed: {replay_display}")
+                replay_display = (
+                    last_processed_replay_id.hex()
+                    if isinstance(last_processed_replay_id, bytes)
+                    else last_processed_replay_id
+                )
+                self.logger.info(
+                    f"Temporary server error - retrying with CUSTOM replay from last processed: {replay_display}"
+                )
                 return ("CUSTOM", last_processed_replay_id)
             else:
-                self.logger.info("Temporary server error - no replay ID available, using original parameters")
+                self.logger.info(
+                    "Temporary server error - no replay ID available, using original parameters"
+                )
                 return (original_replay_type, original_replay_id)
 
         # Resource exhaustion - use CUSTOM with last processed replay ID with longer backoff
         if status_code == grpc.StatusCode.RESOURCE_EXHAUSTED:
             if last_processed_replay_id:
-                replay_display = last_processed_replay_id.hex() if isinstance(last_processed_replay_id, bytes) else last_processed_replay_id
-                self.logger.info(f"Resource exhausted - retrying with CUSTOM replay from: {replay_display}")
+                replay_display = (
+                    last_processed_replay_id.hex()
+                    if isinstance(last_processed_replay_id, bytes)
+                    else last_processed_replay_id
+                )
+                self.logger.info(
+                    f"Resource exhausted - retrying with CUSTOM replay from: {replay_display}"
+                )
                 return ("CUSTOM", last_processed_replay_id)
             else:
                 self.logger.info("Resource exhausted - using LATEST to reduce load")
@@ -311,16 +375,28 @@ class PubSub(object):
         # Timeout errors - continue from where we left off if possible
         if status_code == grpc.StatusCode.DEADLINE_EXCEEDED:
             if last_processed_replay_id:
-                replay_display = last_processed_replay_id.hex() if isinstance(last_processed_replay_id, bytes) else last_processed_replay_id
-                self.logger.info(f"Deadline exceeded - resuming with CUSTOM replay from: {replay_display}")
+                replay_display = (
+                    last_processed_replay_id.hex()
+                    if isinstance(last_processed_replay_id, bytes)
+                    else last_processed_replay_id
+                )
+                self.logger.info(
+                    f"Deadline exceeded - resuming with CUSTOM replay from: {replay_display}"
+                )
                 return ("CUSTOM", last_processed_replay_id)
             else:
-                self.logger.info("Deadline exceeded - no processed events, retrying with original parameters")
+                self.logger.info(
+                    "Deadline exceeded - no processed events, retrying with original parameters"
+                )
                 return (original_replay_type, original_replay_id)
 
         # Handle corrupted replay ID scenarios (look for specific error messages)
-        if "replay" in error_details.lower() and ("invalid" in error_details.lower() or "corrupt" in error_details.lower()):
-            self.logger.warning("Detected corrupted replay ID error - switching to LATEST")
+        if "replay" in error_details.lower() and (
+            "invalid" in error_details.lower() or "corrupt" in error_details.lower()
+        ):
+            self.logger.warning(
+                "Detected corrupted replay ID error - switching to LATEST"
+            )
             return ("LATEST", "")
 
         # Default retry strategy for other retryable errors
@@ -339,19 +415,22 @@ class PubSub(object):
         Salesforce recommends increasing time between calls to prevent repeated errors.
         """
         # Base delay increases more aggressively per Salesforce guidance
-        base_delay = self.base_retry_delay * (2 ** attempt)
+        base_delay = self.base_retry_delay * (2**attempt)
 
         # Cap at maximum delay
         delay = min(base_delay, self.max_retry_delay)
 
         # Add jitter (10-20% variance) to prevent thundering herd
         import random
+
         jitter_factor = 0.1 + (random.random() * 0.1)  # 10-20% jitter
         jitter = delay * jitter_factor
 
         final_delay = delay + jitter
 
-        self.logger.debug(f"Retry attempt {attempt + 1}: base_delay={base_delay:.2f}s, final_delay={final_delay:.2f}s")
+        self.logger.debug(
+            f"Retry attempt {attempt + 1}: base_delay={base_delay:.2f}s, final_delay={final_delay:.2f}s"
+        )
         return final_delay
 
     def _log_grpc_error(self, e, context=""):
@@ -363,7 +442,7 @@ class PubSub(object):
             # Extract basic error information
             status_code = e.code()
             details = e.details()
-            debug_string = getattr(e, 'debug_error_string', lambda: 'N/A')()
+            debug_string = getattr(e, "debug_error_string", lambda: "N/A")()
 
             # Extract custom error codes and RPC ID from trailers per Salesforce docs
             custom_error_code = None
@@ -374,11 +453,11 @@ class PubSub(object):
                 trailers = e.trailing_metadata()
                 if trailers:
                     for key, value in trailers:
-                        if key == 'sfdc-error-code':
+                        if key == "sfdc-error-code":
                             custom_error_code = value
-                        elif key == 'x-rpc-id':
+                        elif key == "x-rpc-id":
                             rpc_id = value
-                        elif key.startswith('sfdc-'):
+                        elif key.startswith("sfdc-"):
                             # Log other Salesforce-specific trailer keys
                             self.logger.debug(f"Salesforce trailer {key}: {value}")
             except Exception as trailer_error:
@@ -413,26 +492,49 @@ class PubSub(object):
             self.logger.info("Recreating gRPC channel and stub for connection recovery")
 
             # Close existing channel if it exists
-            if hasattr(self, 'channel') and self.channel:
+            if hasattr(self, "channel") and self.channel:
                 self.channel.close()
 
             # Recreate channel with original configuration
             # Use stored grpc_host and grpc_port from initialization
-            grpc_host = getattr(self, '_grpc_host', 'api.pubsub.salesforce.com')
-            grpc_port = getattr(self, '_grpc_port', '7443')
+            grpc_host = getattr(self, "_grpc_host", "api.pubsub.salesforce.com")
+            grpc_port = getattr(self, "_grpc_port", "7443")
             pubsub_url = f"{grpc_host}:{grpc_port}"
 
             channel_options = [
-                ('grpc.keepalive_time_ms', 60000),  # Send keepalive every 60 seconds (less aggressive)
-                ('grpc.keepalive_timeout_ms', 10000),  # Wait 10 seconds for keepalive response
-                ('grpc.keepalive_permit_without_calls', True),  # Allow keepalive on idle connections
-                ('grpc.http2.max_pings_without_data', 0),  # Unlimited pings without data
-                ('grpc.http2.min_time_between_pings_ms', 30000),  # Min 30 seconds between pings
-                ('grpc.http2.min_ping_interval_without_data_ms', 300000),  # 5 minutes without data before ping
-                ('grpc.max_connection_idle_ms', 1800000),  # Keep connection for 30 minutes when idle
+                (
+                    "grpc.keepalive_time_ms",
+                    60000,
+                ),  # Send keepalive every 60 seconds (less aggressive)
+                (
+                    "grpc.keepalive_timeout_ms",
+                    10000,
+                ),  # Wait 10 seconds for keepalive response
+                (
+                    "grpc.keepalive_permit_without_calls",
+                    True,
+                ),  # Allow keepalive on idle connections
+                (
+                    "grpc.http2.max_pings_without_data",
+                    0,
+                ),  # Unlimited pings without data
+                (
+                    "grpc.http2.min_time_between_pings_ms",
+                    30000,
+                ),  # Min 30 seconds between pings
+                (
+                    "grpc.http2.min_ping_interval_without_data_ms",
+                    300000,
+                ),  # 5 minutes without data before ping
+                (
+                    "grpc.max_connection_idle_ms",
+                    1800000,
+                ),  # Keep connection for 30 minutes when idle
             ]
 
-            channel = grpc.secure_channel(pubsub_url, secure_channel_credentials, options=channel_options)
+            channel = grpc.secure_channel(
+                pubsub_url, secure_channel_credentials, options=channel_options
+            )
 
             # Add client trace ID interceptor
             trace_interceptor = ClientTraceInterceptor(self.logger)
@@ -577,7 +679,7 @@ class PubSub(object):
                 if time_since_last_response >= 55.0:
                     self.logger.debug(
                         "Approaching Salesforce 60-second limit (%.1fs). Sending compliance FetchRequest.",
-                        time_since_last_response
+                        time_since_last_response,
                     )
                     # Force a FetchRequest to maintain compliance
                     consecutive_timeouts = 0
@@ -596,13 +698,13 @@ class PubSub(object):
                     self.logger.warning(
                         "Multiple semaphore timeouts (#%d). Stream may be experiencing issues. Time since last response: %.1fs",
                         consecutive_timeouts,
-                        time_since_last_response
+                        time_since_last_response,
                     )
                 else:
                     self.logger.debug(
                         "Semaphore acquire timeout #%d (normal for idle streams). Time since last response: %.1fs",
                         consecutive_timeouts,
-                        time_since_last_response
+                        time_since_last_response,
                     )
 
                 if consecutive_timeouts >= max_consecutive_timeouts:
@@ -689,42 +791,68 @@ class PubSub(object):
 
         while attempt <= self.max_retries:
             try:
-                self.logger.info(f"Starting subscription to {topic} (attempt {attempt + 1})")
+                self.logger.info(
+                    f"Starting subscription to {topic} (attempt {attempt + 1})"
+                )
                 # Display replay ID properly for logging
-                replay_id_display = current_replay_id.hex() if isinstance(current_replay_id, bytes) else current_replay_id
-                self.logger.info(f"Using replay strategy: {current_replay_type}, replay_id: {replay_id_display}")
+                replay_id_display = (
+                    current_replay_id.hex()
+                    if isinstance(current_replay_id, bytes)
+                    else current_replay_id
+                )
+                self.logger.info(
+                    f"Using replay strategy: {current_replay_type}, replay_id: {replay_id_display}"
+                )
 
                 # Create enhanced callback that tracks replay IDs and implements deduplication
                 def replay_tracking_callback(event, client):
                     nonlocal last_processed_replay_id
                     try:
                         # Track latest replay ID from the response (store as bytes per Salesforce docs)
-                        if hasattr(event, 'latest_replay_id') and event.latest_replay_id:
-                            last_processed_replay_id = event.latest_replay_id  # Keep as bytes
-                            self.logger.debug(f"Updated last processed replay ID: {event.latest_replay_id.hex()}")
+                        if (
+                            hasattr(event, "latest_replay_id")
+                            and event.latest_replay_id
+                        ):
+                            last_processed_replay_id = (
+                                event.latest_replay_id
+                            )  # Keep as bytes
+                            self.logger.debug(
+                                f"Updated last processed replay ID: {event.latest_replay_id.hex()}"
+                            )
 
                         # Process individual events with deduplication and replay ID tracking
-                        if hasattr(event, 'events') and event.events:
+                        if hasattr(event, "events") and event.events:
                             deduplicated_events = []
                             for individual_event in event.events:
                                 # Check for duplicate using system-generated ID
-                                event_id = getattr(individual_event.event, 'id', None)
+                                event_id = getattr(individual_event.event, "id", None)
                                 if event_id:
                                     if self._is_event_duplicate(event_id):
-                                        self.logger.debug(f"Skipping duplicate event: {event_id}")
+                                        self.logger.debug(
+                                            f"Skipping duplicate event: {event_id}"
+                                        )
                                         continue
                                     else:
                                         self._mark_event_processed(event_id)
                                         deduplicated_events.append(individual_event)
                                 else:
                                     # No event ID available, process anyway but log warning
-                                    self.logger.warning("Event missing system-generated ID, cannot deduplicate")
+                                    self.logger.warning(
+                                        "Event missing system-generated ID, cannot deduplicate"
+                                    )
                                     deduplicated_events.append(individual_event)
 
                                 # Track replay ID for last processed event (store as bytes per Salesforce docs)
-                                if hasattr(individual_event, 'replay_id') and individual_event.replay_id:
-                                    last_processed_replay_id = individual_event.replay_id  # Keep as bytes
-                                    self.logger.debug(f"Processing event with replay ID: {individual_event.replay_id.hex()}")
+                                if (
+                                    hasattr(individual_event, "replay_id")
+                                    and individual_event.replay_id
+                                ):
+                                    last_processed_replay_id = (
+                                        individual_event.replay_id
+                                    )  # Keep as bytes
+                                    self.logger.debug(
+                                        f"Processing event with replay ID: {individual_event.replay_id.hex()}"
+                                    )
 
                             # Create a new event object with deduplicated events for the callback
                             if deduplicated_events:
@@ -732,12 +860,16 @@ class PubSub(object):
                                 deduplicated_event = type(event)(
                                     events=deduplicated_events,
                                     latest_replay_id=event.latest_replay_id,
-                                    rpc_id=getattr(event, 'rpc_id', ''),
-                                    pending_num_requested=getattr(event, 'pending_num_requested', 0)
+                                    rpc_id=getattr(event, "rpc_id", ""),
+                                    pending_num_requested=getattr(
+                                        event, "pending_num_requested", 0
+                                    ),
                                 )
                                 callback(deduplicated_event, client)
                             elif event.events:
-                                self.logger.info(f"All {len(event.events)} events in batch were duplicates, skipping callback")
+                                self.logger.info(
+                                    f"All {len(event.events)} events in batch were duplicates, skipping callback"
+                                )
                             else:
                                 # No events in batch (keepalive), call callback anyway
                                 callback(event, client)
@@ -750,12 +882,16 @@ class PubSub(object):
                         # Don't re-raise callback errors to avoid breaking the stream
 
                 sub_stream = self.stub.Subscribe(
-                    self.fetch_req_stream(topic, current_replay_type, current_replay_id, num_requested),
+                    self.fetch_req_stream(
+                        topic, current_replay_type, current_replay_id, num_requested
+                    ),
                     metadata=self.metadata,
                 )
 
                 self.logger.info(f"Successfully subscribed to {topic}")
-                consecutive_failures = 0  # Reset failure counter on successful connection
+                consecutive_failures = (
+                    0  # Reset failure counter on successful connection
+                )
 
                 # Process events from the stream
                 for event in sub_stream:
@@ -770,7 +906,12 @@ class PubSub(object):
                 self._log_grpc_error(e, f"during subscription to {topic}")
 
                 # Determine retry strategy based on error type and Salesforce best practices
-                retry_strategy = self._determine_retry_strategy(e, last_processed_replay_id, original_replay_type, original_replay_id)
+                retry_strategy = self._determine_retry_strategy(
+                    e,
+                    last_processed_replay_id,
+                    original_replay_type,
+                    original_replay_id,
+                )
 
                 if retry_strategy is None:
                     self.logger.error(f"Non-retryable gRPC error: {e.code()}")
@@ -778,8 +919,14 @@ class PubSub(object):
 
                 current_replay_type, current_replay_id = retry_strategy
                 # Display replay ID properly for logging
-                replay_id_display = current_replay_id.hex() if isinstance(current_replay_id, bytes) else current_replay_id
-                self.logger.info(f"Next retry will use: {current_replay_type}, replay_id: {replay_id_display}")
+                replay_id_display = (
+                    current_replay_id.hex()
+                    if isinstance(current_replay_id, bytes)
+                    else current_replay_id
+                )
+                self.logger.info(
+                    f"Next retry will use: {current_replay_type}, replay_id: {replay_id_display}"
+                )
 
                 # Handle authentication errors with token refresh
                 if e.code() == grpc.StatusCode.UNAUTHENTICATED:
@@ -788,12 +935,16 @@ class PubSub(object):
                         self.auth()  # Re-authenticate
                         self.logger.info("Authentication refreshed successfully")
                     except Exception as auth_error:
-                        self.logger.error(f"Failed to refresh authentication: {auth_error}")
+                        self.logger.error(
+                            f"Failed to refresh authentication: {auth_error}"
+                        )
                         consecutive_failures += 1
 
                 # Check if we've had too many consecutive failures
                 if consecutive_failures >= max_consecutive_failures:
-                    self.logger.error(f"Too many consecutive failures ({consecutive_failures}), attempting channel recreation")
+                    self.logger.error(
+                        f"Too many consecutive failures ({consecutive_failures}), attempting channel recreation"
+                    )
                     if not self._recreate_channel_and_stub():
                         self.logger.error("Failed to recreate channel, giving up")
                         raise
@@ -806,7 +957,9 @@ class PubSub(object):
             # Calculate retry delay and wait (only if we haven't exceeded max retries)
             if attempt < self.max_retries:
                 retry_delay = self._get_retry_delay(attempt)
-                self.logger.info(f"Retrying subscription in {retry_delay:.2f} seconds...")
+                self.logger.info(
+                    f"Retrying subscription in {retry_delay:.2f} seconds..."
+                )
                 time.sleep(retry_delay)
 
             attempt += 1

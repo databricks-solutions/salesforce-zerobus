@@ -9,7 +9,12 @@ import logging
 import os
 import time
 
-from zerobus_sdk import StreamConfigurationOptions, TableProperties, StreamState, ZerobusException
+from zerobus_sdk import (
+    StreamConfigurationOptions,
+    StreamState,
+    TableProperties,
+    ZerobusException,
+)
 from zerobus_sdk.aio import ZerobusSdk
 
 from ..pubsub.proto import salesforce_events_pb2
@@ -84,8 +89,8 @@ class DatabricksForwarder:
             return {
                 "status": state.name.lower(),
                 "healthy": state in [StreamState.OPENED, StreamState.RECOVERING],
-                "stream_id": getattr(self.stream, 'stream_id', None),
-                "state_code": state.value
+                "stream_id": getattr(self.stream, "stream_id", None),
+                "state_code": state.value,
             }
         except Exception as e:
             return {"status": "error", "healthy": False, "error": str(e)}
@@ -130,7 +135,7 @@ class DatabricksForwarder:
         """
         # Check if we need to recreate the stream
         if not self._is_stream_healthy():
-            if self.stream and hasattr(self.stream, 'get_state'):
+            if self.stream and hasattr(self.stream, "get_state"):
                 state = self.stream.get_state()
                 if state in [StreamState.FAILED, StreamState.CLOSED]:
                     self.logger.info("Recreating failed/closed stream using SDK method")
@@ -198,7 +203,7 @@ class DatabricksForwarder:
                     self.logger.warning(f"Stream error detected: {e}")
 
                     # Recreate stream using SDK method if possible
-                    if hasattr(self.stream, 'get_state'):
+                    if hasattr(self.stream, "get_state"):
                         state = self.stream.get_state()
                         if state in [StreamState.FAILED, StreamState.CLOSED]:
                             self.logger.info("Using SDK recreate_stream method")
@@ -226,7 +231,9 @@ class DatabricksForwarder:
             self.logger.error(f"Failed to forward event to Databricks: {e}")
             # Check if stream should be reset for next attempt
             if "closed" in str(e).lower() or "stream" in str(e).lower():
-                self.logger.warning("Marking stream as inactive due to persistent errors")
+                self.logger.warning(
+                    "Marking stream as inactive due to persistent errors"
+                )
                 self.stream = None
             # Re-raise to allow caller to handle
             raise

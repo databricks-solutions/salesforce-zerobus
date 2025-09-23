@@ -397,7 +397,7 @@ class SalesforceZerobus:
                         event_package = {
                             "decoded_event": decoded_event,
                             "payload_binary": payload_bytes,
-                            "schema_json": json_schema
+                            "schema_json": json_schema,
                         }
                         self.event_queue.put(event_package)
 
@@ -427,7 +427,7 @@ class SalesforceZerobus:
                         event_package["decoded_event"],
                         self.org_id,
                         event_package["payload_binary"],
-                        event_package["schema_json"]
+                        event_package["schema_json"],
                     )
                     self.event_queue.task_done()
                 else:
@@ -516,12 +516,13 @@ class SalesforceZerobus:
         except Exception as e:
             # Enhanced error logging with more context
             import traceback
+
             self.logger.error(f"Critical streaming error: {e}")
             self.logger.error(f"Error type: {type(e).__name__}")
             self.logger.error(f"Traceback: {traceback.format_exc()}")
 
             # Check if this is a gRPC error and log additional details
-            if hasattr(e, 'code') and hasattr(e, 'details'):
+            if hasattr(e, "code") and hasattr(e, "details"):
                 self.logger.error(f"gRPC Status Code: {e.code()}")
                 self.logger.error(f"gRPC Details: {e.details()}")
 
@@ -532,7 +533,9 @@ class SalesforceZerobus:
             self.logger.info("Cleaning up resources...")
 
             # Close gRPC channel properly
-            if hasattr(self, "_pubsub_client") and hasattr(self._pubsub_client, "channel"):
+            if hasattr(self, "_pubsub_client") and hasattr(
+                self._pubsub_client, "channel"
+            ):
                 try:
                     self._pubsub_client.channel.close()
                     self.logger.info("gRPC channel closed successfully")
