@@ -207,19 +207,29 @@ class DatabricksForwarder:
             )
 
         except ZerobusException as e:
-            # Only handle non-recoverable errors - SDK handles recoverable ones automatically
-            self.logger.error(f"Non-recoverable Zerobus error: {e}")
-            # For non-recoverable errors, we may need to recreate the stream manually
-            if (
-                "schema" in str(e).lower()
-                or "permission" in str(e).lower()
-                or "authentication" in str(e).lower()
-            ):
-                self.logger.warning(
-                    "Non-recoverable error detected - may require stream recreation"
+            # Per Zerobus docs: ZerobusException means stream permanently failed after all SDK recovery attempts
+            # Client is responsible for handling the failure using recreate_stream()
+            self.logger.warning(f"Stream permanently failed after SDK recovery attempts, recreating: {e}")
+
+            try:
+                # Use SDK's recreate_stream method as documented
+                self.stream = await self.sdk.recreate_stream(self.stream)
+                self.logger.info("Successfully recreated failed stream")
+
+                # Retry the ingestion with the new stream
+                await self.stream.ingest_record(pb_event)
+
+                # Log successful retry
+                record_id = record_ids[0] if record_ids else "unknown"
+                self.logger.info(
+                    f"Retry successful - Ingested to Databricks: {self.table_name} - {entity_name} {change_type} {record_id}"
                 )
-                self.stream = None
-            raise
+
+            except Exception as retry_error:
+                # If recreate_stream or retry fails, this indicates a more serious issue
+                self.logger.error(f"Failed to recreate stream or retry ingestion: {retry_error}")
+                self.stream = None  # Force reinitialization on next attempt
+                raise
 
         except Exception as e:
             # Handle unexpected errors
@@ -232,6 +242,14 @@ class DatabricksForwarder:
             try:
                 await self.stream.flush()
                 self.logger.debug("Flushed pending records to Databricks")
+            except ZerobusException as e:
+                # Per Zerobus docs: recreate stream if flush fails with ZerobusException
+                self.logger.warning(f"Flush failed, stream permanently failed, recreating: {e}")
+                self.stream = await self.sdk.recreate_stream(self.stream)
+                self.logger.info("Successfully recreated stream after flush failure")
+                # Retry flush with new stream
+                await self.stream.flush()
+                self.logger.debug("Flush retry successful after stream recreation")
             except Exception as e:
                 self.logger.error(f"Failed to flush records: {e}")
                 raise
