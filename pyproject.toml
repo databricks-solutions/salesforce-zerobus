@@ -99,3 +99,6 @@ exclude = [
     ".*_pb2.py",
     ".*_pb2_grpc.py", 
 ]
+
+[tool.uv.sources]
+databricks-zerobus = { path = "databricks_zerobus-0.0.16-py3-none-any.whl" }

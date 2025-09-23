@@ -5,12 +5,12 @@ __pycache__/
 
 # C extensions
 *.so
-
+!dist/*.whl
+!**/*.whl
 # Distribution / packaging
 .Python
 build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -19,7 +19,6 @@ lib64/
 parts/
 sdist/
 var/
-# wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -27,6 +26,8 @@ share/python-wheels/
 MANIFEST
 uv.lock
 databricks_zerobus*
+unpacked_wheel/*
+links.md
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -53,7 +54,6 @@ coverage.xml
 .pytest_cache/
 cover/
 salesforce_zerobus/zerobus_sdk
-wheels/
 # Translations
 *.mo
 *.pot
