@@ -80,12 +80,12 @@ class FlowController:
             if self.consecutive_timeouts >= 2:
                 self.logger.warning(
                     f"Multiple semaphore timeouts #{self.consecutive_timeouts} "
-                    f"(waited {effective_timeout}s). Stream may be experiencing issues."
+                    f"(waited {effective_timeout}s). Stream may be experiencing issues or high latency."
                 )
             else:
-                self.logger.debug(
-                    f"Semaphore acquire timeout #{self.consecutive_timeouts} "
-                    f"(waited {effective_timeout}s). Normal for idle streams."
+                self.logger.info(
+                    f"Semaphore timeout #{self.consecutive_timeouts} "
+                    f"(waited {effective_timeout}s). Normal for idle streams - aligned with Salesforce 60s requirement."
                 )
             
             # Attempt recovery if too many consecutive timeouts

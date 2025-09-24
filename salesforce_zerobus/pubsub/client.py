@@ -127,6 +127,9 @@ class PubSub(object):
         self._grpc_host = grpc_host
         self._grpc_port = grpc_port
 
+        # Store timeout configuration (centralized from core.py)
+        self.timeout_seconds = float(argument_dict.get("timeout_seconds", 45.0))
+
         # Connection resilience settings
         self.max_retries = 5
         self.base_retry_delay = 1.0
@@ -675,17 +678,15 @@ class PubSub(object):
             # Only send FetchRequest when needed. Semaphore release indicates need for new FetchRequest
             # Use flow controller if available, otherwise fall back to basic semaphore
             if self.flow_controller:
-                # Use 55-second timeout to stay within Salesforce's 60-second requirement
-                acquired = self.flow_controller.acquire(timeout=55.0)
+                acquired = self.flow_controller.acquire(timeout=self.timeout_seconds)
             else:
-                # Use 55-second timeout to stay within Salesforce's 60-second requirement
-                acquired = self.semaphore.acquire(timeout=55.0)
+                acquired = self.semaphore.acquire(timeout=self.timeout_seconds)
 
             if not acquired:
                 consecutive_timeouts += 1
 
                 # Check if we're approaching Salesforce's 60-second limit
-                if time_since_last_response >= 55.0:
+                if time_since_last_response >= self.timeout_seconds:
                     self.logger.debug(
                         "Approaching Salesforce 60-second limit (%.1fs). Sending compliance FetchRequest.",
                         time_since_last_response,

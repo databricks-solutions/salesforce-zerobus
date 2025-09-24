@@ -67,14 +67,15 @@ class DatabricksForwarder:
         )
 
         # Configure stream options with enhanced recovery settings
-        # Default to production-ready recovery configuration
+        # Default to production-ready recovery configuration aligned with documentation
         default_config = {
             "recovery": True,  # Always enable recovery
             "recovery_retries": 5,  # Increased for production resilience
-            "recovery_timout_ms": 30000,  # 30 seconds per attempt
+            "recovery_timout_ms": 15000,  # 15 seconds per attempt (faster recovery)
             "recovery_backoff_ms": 5000,  # 5 second backoff
-            "server_lack_of_ack_timeout_ms": 60000,  # 60 seconds server timeout
-            "max_inflight_records": 50000,  # Default batch size
+            "server_lack_of_ack_timeout_ms": 180000,  # 3 minutes (increased from 1 minute)
+            "max_inflight_records": 25000,  # Conservative for reliability (reduced from 50k)
+            "flush_timeout_ms": 300000,  # 5 minutes for batch operations
         }
 
         # Merge user-provided options with defaults (user options take precedence)

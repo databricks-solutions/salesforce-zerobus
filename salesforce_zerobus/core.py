@@ -67,8 +67,8 @@ class SalesforceZerobus:
         databricks_auth: Dict[str, str] = None,
         batch_size: int = 10,
         enable_replay_recovery: bool = True,
-        timeout_seconds: float = 300.0,
-        max_timeouts: int = 3,
+        timeout_seconds: float = 45.0,
+        max_timeouts: int = 2,
         grpc_host: str = "api.pubsub.salesforce.com",
         grpc_port: int = 7443,
         api_version: str = "57.0",
@@ -239,6 +239,7 @@ class SalesforceZerobus:
             "apiVersion": self.api_version,
             "topic": self.topic,
             "batchSize": str(self.batch_size),
+            "timeout_seconds": self.timeout_seconds,
         }
 
         self._pubsub_client = PubSub(pubsub_args)
