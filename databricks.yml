@@ -27,10 +27,10 @@ include:
 targets:
   dev:
     default: true
-    mode: production
+    mode: development
     # workspace:
     #   root_path: /Workspace/Users/.bundle/${bundle.name}/${bundle.target}
     variables:
       salesforce_objects: '["AccountChangeEvent", "LeadChangeEvent", "OpportunityChangeEvent", "ContactChangeEvent"]'
-      ldp_catalog: 'your_catalog'
-      ldp_schema: 'your_schema'
+      ldp_catalog: grant_doyle
+      ldp_schema: zerobus

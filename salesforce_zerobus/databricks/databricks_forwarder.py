@@ -74,7 +74,7 @@ class DatabricksForwarder:
             "recovery_timout_ms": 15000,  # 15 seconds per attempt (faster recovery)
             "recovery_backoff_ms": 5000,  # 5 second backoff
             "server_lack_of_ack_timeout_ms": 180000,  # 3 minutes (increased from 1 minute)
-            "max_inflight_records": 25000,  # Conservative for reliability (reduced from 50k)
+            "max_inflight_records": 50000,  # Conservative for reliability (reduced from 50k)
             "flush_timeout_ms": 300000,  # 5 minutes for batch operations
         }
 
@@ -210,7 +210,9 @@ class DatabricksForwarder:
         except ZerobusException as e:
             # Per Zerobus docs: ZerobusException means stream permanently failed after all SDK recovery attempts
             # Client is responsible for handling the failure using recreate_stream()
-            self.logger.warning(f"Stream permanently failed after SDK recovery attempts, recreating: {e}")
+            self.logger.warning(
+                f"Stream permanently failed after SDK recovery attempts, recreating: {e}"
+            )
 
             try:
                 # Use SDK's recreate_stream method as documented
@@ -228,7 +230,9 @@ class DatabricksForwarder:
 
             except Exception as retry_error:
                 # If recreate_stream or retry fails, this indicates a more serious issue
-                self.logger.error(f"Failed to recreate stream or retry ingestion: {retry_error}")
+                self.logger.error(
+                    f"Failed to recreate stream or retry ingestion: {retry_error}"
+                )
                 self.stream = None  # Force reinitialization on next attempt
                 raise
 
@@ -245,7 +249,9 @@ class DatabricksForwarder:
                 self.logger.debug("Flushed pending records to Databricks")
             except ZerobusException as e:
                 # Per Zerobus docs: recreate stream if flush fails with ZerobusException
-                self.logger.warning(f"Flush failed, stream permanently failed, recreating: {e}")
+                self.logger.warning(
+                    f"Flush failed, stream permanently failed, recreating: {e}"
+                )
                 self.stream = await self.sdk.recreate_stream(self.stream)
                 self.logger.info("Successfully recreated stream after flush failure")
                 # Retry flush with new stream
