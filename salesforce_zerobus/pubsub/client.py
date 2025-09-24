@@ -643,10 +643,19 @@ class PubSub(object):
                 replay_preset = pb2.ReplayPreset.CUSTOM
             case _:
                 raise ValueError("Invalid Replay Type " + replay_type)
+
+        # Handle replay_id type conversion - it can be bytes or hex string
+        if isinstance(replay_id, bytes):
+            replay_id_bytes = replay_id
+        elif isinstance(replay_id, str):
+            replay_id_bytes = bytes.fromhex(replay_id)
+        else:
+            replay_id_bytes = b""  # Empty bytes for LATEST/EARLIEST
+
         return pb2.FetchRequest(
             topic_name=topic,
             replay_preset=replay_preset,
-            replay_id=bytes.fromhex(replay_id),
+            replay_id=replay_id_bytes,
             num_requested=num_requested,
         )
 
