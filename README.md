@@ -1,5 +1,7 @@
 # SalesforceZerobus 🚀
 
+![Zerobus Architecture](zerobus_graphic.png)
+
 A simple, production-ready Python library for streaming Salesforce Change Data Capture (CDC) events to Databricks Delta tables in real-time using the Salesforce Pub/Sub API and Databricks Zerobus API.
 
 [![Python](https://img.shields.io/badge/Python-3.10-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
