@@ -13,6 +13,8 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
+logging.getLogger("zerobus_sdk").setLevel(logging.WARNING)
+
 streamer = SalesforceZerobus(
     sf_object_channel=os.getenv(
         "SALESFORCE_CHANGE_EVENT_CHANNEL"
