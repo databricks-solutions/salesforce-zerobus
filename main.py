@@ -25,11 +25,10 @@ streamer = SalesforceZerobus(
     },
     databricks_auth={
         "workspace_url": os.getenv("DATABRICKS_WORKSPACE_URL"),
-        "api_token": os.getenv("DATABRICKS_API_TOKEN"),
+        "client_id": os.getenv("DATABRICKS_CLIENT_ID"),
+        "client_secret": os.getenv("DATABRICKS_CLIENT_SECRET"),
         "ingest_endpoint": os.getenv("DATABRICKS_INGEST_ENDPOINT"),
         "sql_endpoint": os.getenv("DATABRICKS_SQL_ENDPOINT"),
-        "sql_workspace_url": os.getenv("DATABRICKS_SQL_WORKSPACE_URL"),
-        "sql_api_token": os.getenv("DATABRICKS_SQL_API_TOKEN"),
     },
 )
 

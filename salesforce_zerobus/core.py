@@ -33,7 +33,8 @@ class SalesforceZerobus:
             },
             databricks_auth={
                 "workspace_url": "https://workspace.cloud.databricks.com",
-                "api_token": "dapi...",
+                "client_id": "your-service-principal-client-id",
+                "client_secret": "your-service-principal-client-secret",
                 "ingest_endpoint": "workspace-id.ingest.cloud.databricks.com"
             }
         )
@@ -92,7 +93,7 @@ class SalesforceZerobus:
             sf_object_channel: CDC channel name (e.g., "AccountChangeEvent", "CustomObject__cChangeEvent")
             databricks_table: Target Databricks table name (catalog.schema.table)
             salesforce_auth: Dict with keys: username, password, instance_url
-            databricks_auth: Dict with keys: workspace_url, api_token, ingest_endpoint
+            databricks_auth: Dict with keys: workspace_url, client_id, client_secret, ingest_endpoint
             batch_size: Number of events to fetch per request (default: 10)
             enable_replay_recovery: Enable zero-data-loss replay recovery (default: True)
             timeout_seconds: Timeout for semaphore operations (default: 300.0)
@@ -205,7 +206,8 @@ class SalesforceZerobus:
         # Validate Databricks auth
         required_db_keys = [
             "workspace_url",
-            "api_token",
+            "client_id",
+            "client_secret",
             "ingest_endpoint",
             "sql_endpoint",
         ]
@@ -249,7 +251,8 @@ class SalesforceZerobus:
         self._databricks_forwarder = DatabricksForwarder(
             ingest_endpoint=self.databricks_auth["ingest_endpoint"],
             workspace_url=self.databricks_auth["workspace_url"],
-            api_token=self.databricks_auth["api_token"],
+            client_id=self.databricks_auth["client_id"],
+            client_secret=self.databricks_auth["client_secret"],
             table_name=self.databricks_table,
             stream_config_options=self.zerobus_config,
         )
@@ -261,10 +264,9 @@ class SalesforceZerobus:
                     table_name=self.databricks_table,
                     object_name=self.sf_object,
                     workspace_url=self.databricks_auth["workspace_url"],
-                    api_token=self.databricks_auth["api_token"],
+                    client_id=self.databricks_auth["client_id"],
+                    client_secret=self.databricks_auth["client_secret"],
                     sql_endpoint=self.databricks_auth["sql_endpoint"],
-                    sql_workspace_url=self.databricks_auth.get("sql_workspace_url"),
-                    sql_api_token=self.databricks_auth.get("sql_api_token"),
                 )
                 self.logger.info(
                     "Replay recovery enabled - will resume from last position"

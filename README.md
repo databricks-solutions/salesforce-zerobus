@@ -19,6 +19,7 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 - **⛔️ Eliminates Message Buses** - With Databricks Zerobus you know longer need message buses to sink data to your lake.  
 - **🔄 Zero Data Loss** - Automatic replay recovery ensures no missed events during outages
 - **🛡️ Production Ready** - Comprehensive error handling, health monitoring, and timeout protection
+- **🔐 OAuth Security** - Uses Service Principal authentication for enhanced security (API tokens deprecated)
 - **📦 Self-contained** - Bundles all dependencies (no external wheel dependencies)
 - **🔧 Flexible Configuration** - Support for all Salesforce objects (Account, Lead, Contact, Custom Objects)
 - **⚙️ Both Sync & Async** - Use blocking calls or async context manager patterns
@@ -66,11 +67,12 @@ streamer = SalesforceZerobus(
         "instance_url": "https://your-instance.salesforce.com"
     },
     
-    # Databricks credentials  
+    # Databricks credentials (OAuth Service Principal)
     databricks_auth={
         "workspace_url": "https://your-workspace.cloud.databricks.com",
-        "api_token": "dapi12345...",  # Your Databricks personal access token
-        "ingest_endpoint": "12345.ingest.cloud.databricks.com"
+        "client_id": "your-service-principal-client-id",
+        "client_secret": "your-service-principal-client-secret",
+        "ingest_endpoint": "12345.zerobus.region.cloud.databricks.com"
     }
 )
 
@@ -195,9 +197,48 @@ INFO - Received CustomObject__c DELETE 001def456abc789
 - Check that your org allows Pub/Sub API access
 
 ### 2. Databricks Setup
-#### 🚨 If you do not create the table before running the service, a table will be made for you using the name specified in main.py. This step is optional. 
- 🚨 ``` 
-'delta.enableRowTracking' = 'false'```  Must be set for all Zerobus target tables.
+
+#### Create OAuth Service Principal
+1. **Go to your Databricks workspace**
+2. **Navigate to Settings → Identity and Access → Service Principals**
+3. **Create a new Service Principal**
+4. **Generate OAuth credentials**:
+   - Generate and save the **client ID** and **client secret**
+   - These replace traditional API tokens for better security
+5. **Grant permissions** to your Service Principal:
+   - Table access permissions for your target Delta table
+   - Workspace permissions for SQL operations
+
+#### 🔐 OAuth vs API Tokens (Migration Guide)
+
+**For users migrating from API tokens:**
+- **Enhanced Security**: OAuth tokens auto-refresh every hour vs. static API tokens
+- **Unified Authentication**: Single Service Principal for all Databricks operations
+- **Simplified Configuration**: No separate SQL API tokens needed
+- **Future-Proof**: Databricks recommends OAuth for 2025+ (API tokens being deprecated)
+
+**Migration steps:**
+1. Create Service Principal (steps above)
+2. Update environment variables:
+   ```bash
+   # Replace these:
+   # DATABRICKS_API_TOKEN=dapi...
+   # DATABRICKS_SQL_API_TOKEN=dapi...
+
+   # With these:
+   DATABRICKS_CLIENT_ID=your-service-principal-client-id
+   DATABRICKS_CLIENT_SECRET=your-service-principal-client-secret
+   ```
+3. Update ingest endpoint format:
+   ```bash
+   # Change from: workspace-id.ingest.region.cloud.databricks.com
+   # To:         workspace-id.zerobus.region.cloud.databricks.com
+   ```
+
+#### 🚨 Table Configuration
+If you do not create the table before running the service, a table will be made for you using the name specified in main.py. This step is optional.
+
+🚨 **Important**: `'delta.enableRowTracking' = 'false'` must be set for all Zerobus target tables.
 #### (Optional) Create Delta Table
 Run this SQL in your Databricks workspace:
 
@@ -248,10 +289,11 @@ streamer = SalesforceZerobus(
         "password": "password+token", 
         "instance_url": "https://company.salesforce.com"
     },
-    databricks_auth={                      # Databricks credentials dict
+    databricks_auth={                      # Databricks OAuth Service Principal
         "workspace_url": "https://workspace.cloud.databricks.com",
-        "api_token": "dapi...",
-        "ingest_endpoint": "workspace-id.ingest.cloud.databricks.com"
+        "client_id": "your-service-principal-client-id",
+        "client_secret": "your-service-principal-client-secret",
+        "ingest_endpoint": "workspace-id.zerobus.region.cloud.databricks.com"
     },
     
     # Optional parameters with defaults

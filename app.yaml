@@ -11,7 +11,9 @@ env:
     value: ''
   - name: 'DATABRICKS_WORKSPACE_URL'
     value: ''
-  - name: 'DATABRICKS_API_TOKEN'
+  - name: 'DATABRICKS_CLIENT_ID' # OAuth Service Principal client ID
+    value: ''
+  - name: 'DATABRICKS_CLIENT_SECRET' # OAuth Service Principal client secret
     value: ''
   - name: 'DATABRICKS_INGEST_ENDPOINT'
     value: ''
@@ -19,10 +21,7 @@ env:
     value: ''
   - name: 'DATABRICKS_SQL_ENDPOINT' # Optional
     value: ''
-  - name: 'DATABRICKS_SQL_WORKSPACE_URL' # Optional
-    value: ''
-  - name: 'DATABRICKS_SQL_API_TOKEN' # Optional
-    value: ''
+
   # - name: 'ZEROBUS_FLUSH_TIMEOUT_MS' # Optional
   #   value: '900000'
   # - name: 'ZEROBUS_SERVER_ACK_TIMEOUT_MS' # Optional

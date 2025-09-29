@@ -14,6 +14,7 @@ from zerobus_sdk import (
     StreamState,
     TableProperties,
     ZerobusException,
+    get_zerobus_token,
 )
 from zerobus_sdk.aio import ZerobusSdk
 
@@ -32,7 +33,8 @@ class DatabricksForwarder:
         self,
         ingest_endpoint: str,
         workspace_url: str,
-        api_token: str,
+        client_id: str,
+        client_secret: str,
         table_name: str,
         stream_config_options: dict = None,
     ):
@@ -42,7 +44,8 @@ class DatabricksForwarder:
         Args:
             ingest_endpoint: Databricks ingest endpoint
             workspace_url: Databricks workspace URL
-            api_token: Databricks API token
+            client_id: OAuth Service Principal client ID
+            client_secret: OAuth Service Principal client secret
             table_name: Target Delta table name
             stream_config_options: Optional dict of ZerobusSdk stream configuration options
                 Available options (recovery is always enabled):
@@ -57,10 +60,11 @@ class DatabricksForwarder:
         """
         self.ingest_endpoint = ingest_endpoint
         self.workspace_url = workspace_url
-        self.api_token = api_token
+        self.client_id = client_id
+        self.client_secret = client_secret
         self.table_name = table_name
 
-        self.sdk = ZerobusSdk(ingest_endpoint, workspace_url, api_token)
+        self.sdk = ZerobusSdk(ingest_endpoint)
 
         self.table_properties = TableProperties(
             table_name, salesforce_events_pb2.SalesforceEvent.DESCRIPTOR
@@ -87,6 +91,15 @@ class DatabricksForwarder:
         # Add optional acknowledgment callback for monitoring (if not provided)
         if "ack_callback" not in final_config:
             final_config["ack_callback"] = self._default_ack_callback
+
+        # Add OAuth token factory for authentication
+        final_config["token_factory"] = lambda: get_zerobus_token(
+            self.table_name,
+            self.ingest_endpoint.split(".")[0],
+            self.workspace_url,
+            self.client_id,
+            self.client_secret
+        )
 
         self.stream_config = StreamConfigurationOptions(**final_config)
 
@@ -290,7 +303,8 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
         Required:
         - DATABRICKS_INGEST_ENDPOINT: Databricks ingest endpoint
         - DATABRICKS_WORKSPACE_URL: Databricks workspace URL
-        - DATABRICKS_API_TOKEN: Databricks API token
+        - DATABRICKS_CLIENT_ID: OAuth Service Principal client ID
+        - DATABRICKS_CLIENT_SECRET: OAuth Service Principal client secret
         - DATABRICKS_TABLE_NAME: Target table name (if table_name param not provided)
 
         Optional ZerobusSdk Stream Configuration (recovery always enabled):
@@ -307,7 +321,8 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
     required_vars = [
         "DATABRICKS_INGEST_ENDPOINT",
         "DATABRICKS_WORKSPACE_URL",
-        "DATABRICKS_API_TOKEN",
+        "DATABRICKS_CLIENT_ID",
+        "DATABRICKS_CLIENT_SECRET",
     ]
 
     missing_vars = [var for var in required_vars if not os.getenv(var)]
@@ -351,7 +366,8 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
     return DatabricksForwarder(
         ingest_endpoint=os.getenv("DATABRICKS_INGEST_ENDPOINT"),
         workspace_url=os.getenv("DATABRICKS_WORKSPACE_URL"),
-        api_token=os.getenv("DATABRICKS_API_TOKEN"),
+        client_id=os.getenv("DATABRICKS_CLIENT_ID"),
+        client_secret=os.getenv("DATABRICKS_CLIENT_SECRET"),
         table_name=target_table_name,
         stream_config_options=stream_config if stream_config else None,
     )
