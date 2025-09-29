@@ -15,7 +15,8 @@ Example:
         },
         databricks_auth={
             "workspace_url": "https://workspace.cloud.databricks.com",
-            "api_token": "dapi...",
+            "client_id": "your-service-principal-client-id",
+            "client_secret": "your-service-principal-client-secret",
             "ingest_endpoint": "workspace-id.ingest.cloud.databricks.com"
         }
     )

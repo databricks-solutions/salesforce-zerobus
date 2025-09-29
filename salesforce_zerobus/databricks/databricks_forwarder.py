@@ -14,6 +14,7 @@ from zerobus_sdk import (
     StreamState,
     TableProperties,
     ZerobusException,
+    get_zerobus_token,
 )
 from zerobus_sdk.aio import ZerobusSdk
 
@@ -32,7 +33,8 @@ class DatabricksForwarder:
         self,
         ingest_endpoint: str,
         workspace_url: str,
-        api_token: str,
+        client_id: str,
+        client_secret: str,
         table_name: str,
         stream_config_options: dict = None,
     ):
@@ -42,7 +44,8 @@ class DatabricksForwarder:
         Args:
             ingest_endpoint: Databricks ingest endpoint
             workspace_url: Databricks workspace URL
-            api_token: Databricks API token
+            client_id: OAuth Service Principal client ID
+            client_secret: OAuth Service Principal client secret
             table_name: Target Delta table name
             stream_config_options: Optional dict of ZerobusSdk stream configuration options
                 Available options (recovery is always enabled):
@@ -57,24 +60,26 @@ class DatabricksForwarder:
         """
         self.ingest_endpoint = ingest_endpoint
         self.workspace_url = workspace_url
-        self.api_token = api_token
+        self.client_id = client_id
+        self.client_secret = client_secret
         self.table_name = table_name
 
-        self.sdk = ZerobusSdk(ingest_endpoint, workspace_url, api_token)
+        self.sdk = ZerobusSdk(ingest_endpoint)
 
         self.table_properties = TableProperties(
             table_name, salesforce_events_pb2.SalesforceEvent.DESCRIPTOR
         )
 
         # Configure stream options with enhanced recovery settings
-        # Default to production-ready recovery configuration
+        # Default to production-ready recovery configuration aligned with documentation
         default_config = {
             "recovery": True,  # Always enable recovery
             "recovery_retries": 5,  # Increased for production resilience
-            "recovery_timout_ms": 30000,  # 30 seconds per attempt
+            "recovery_timout_ms": 15000,  # 15 seconds per attempt (faster recovery)
             "recovery_backoff_ms": 5000,  # 5 second backoff
-            "server_lack_of_ack_timeout_ms": 60000,  # 60 seconds server timeout
-            "max_inflight_records": 50000,  # Default batch size
+            "server_lack_of_ack_timeout_ms": 180000,  # 3 minutes (increased from 1 minute)
+            "max_inflight_records": 50000,  # Conservative for reliability (reduced from 50k)
+            "flush_timeout_ms": 300000,  # 5 minutes for batch operations
         }
 
         # Merge user-provided options with defaults (user options take precedence)
@@ -86,6 +91,15 @@ class DatabricksForwarder:
         # Add optional acknowledgment callback for monitoring (if not provided)
         if "ack_callback" not in final_config:
             final_config["ack_callback"] = self._default_ack_callback
+
+        # Add OAuth token factory for authentication
+        final_config["token_factory"] = lambda: get_zerobus_token(
+            self.table_name,
+            self.ingest_endpoint.split(".")[0],
+            self.workspace_url,
+            self.client_id,
+            self.client_secret
+        )
 
         self.stream_config = StreamConfigurationOptions(**final_config)
 
@@ -207,19 +221,33 @@ class DatabricksForwarder:
             )
 
         except ZerobusException as e:
-            # Only handle non-recoverable errors - SDK handles recoverable ones automatically
-            self.logger.error(f"Non-recoverable Zerobus error: {e}")
-            # For non-recoverable errors, we may need to recreate the stream manually
-            if (
-                "schema" in str(e).lower()
-                or "permission" in str(e).lower()
-                or "authentication" in str(e).lower()
-            ):
-                self.logger.warning(
-                    "Non-recoverable error detected - may require stream recreation"
+            # Per Zerobus docs: ZerobusException means stream permanently failed after all SDK recovery attempts
+            # Client is responsible for handling the failure using recreate_stream()
+            self.logger.warning(
+                f"Stream permanently failed after SDK recovery attempts, recreating: {e}"
+            )
+
+            try:
+                # Use SDK's recreate_stream method as documented
+                self.stream = await self.sdk.recreate_stream(self.stream)
+                self.logger.info("Successfully recreated failed stream")
+
+                # Retry the ingestion with the new stream
+                await self.stream.ingest_record(pb_event)
+
+                # Log successful retry
+                record_id = record_ids[0] if record_ids else "unknown"
+                self.logger.info(
+                    f"Retry successful - Ingested to Databricks: {self.table_name} - {entity_name} {change_type} {record_id}"
                 )
-                self.stream = None
-            raise
+
+            except Exception as retry_error:
+                # If recreate_stream or retry fails, this indicates a more serious issue
+                self.logger.error(
+                    f"Failed to recreate stream or retry ingestion: {retry_error}"
+                )
+                self.stream = None  # Force reinitialization on next attempt
+                raise
 
         except Exception as e:
             # Handle unexpected errors
@@ -232,6 +260,16 @@ class DatabricksForwarder:
             try:
                 await self.stream.flush()
                 self.logger.debug("Flushed pending records to Databricks")
+            except ZerobusException as e:
+                # Per Zerobus docs: recreate stream if flush fails with ZerobusException
+                self.logger.warning(
+                    f"Flush failed, stream permanently failed, recreating: {e}"
+                )
+                self.stream = await self.sdk.recreate_stream(self.stream)
+                self.logger.info("Successfully recreated stream after flush failure")
+                # Retry flush with new stream
+                await self.stream.flush()
+                self.logger.debug("Flush retry successful after stream recreation")
             except Exception as e:
                 self.logger.error(f"Failed to flush records: {e}")
                 raise
@@ -265,7 +303,8 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
         Required:
         - DATABRICKS_INGEST_ENDPOINT: Databricks ingest endpoint
         - DATABRICKS_WORKSPACE_URL: Databricks workspace URL
-        - DATABRICKS_API_TOKEN: Databricks API token
+        - DATABRICKS_CLIENT_ID: OAuth Service Principal client ID
+        - DATABRICKS_CLIENT_SECRET: OAuth Service Principal client secret
         - DATABRICKS_TABLE_NAME: Target table name (if table_name param not provided)
 
         Optional ZerobusSdk Stream Configuration (recovery always enabled):
@@ -282,7 +321,8 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
     required_vars = [
         "DATABRICKS_INGEST_ENDPOINT",
         "DATABRICKS_WORKSPACE_URL",
-        "DATABRICKS_API_TOKEN",
+        "DATABRICKS_CLIENT_ID",
+        "DATABRICKS_CLIENT_SECRET",
     ]
 
     missing_vars = [var for var in required_vars if not os.getenv(var)]
@@ -326,7 +366,8 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
     return DatabricksForwarder(
         ingest_endpoint=os.getenv("DATABRICKS_INGEST_ENDPOINT"),
         workspace_url=os.getenv("DATABRICKS_WORKSPACE_URL"),
-        api_token=os.getenv("DATABRICKS_API_TOKEN"),
+        client_id=os.getenv("DATABRICKS_CLIENT_ID"),
+        client_secret=os.getenv("DATABRICKS_CLIENT_SECRET"),
         table_name=target_table_name,
         stream_config_options=stream_config if stream_config else None,
     )

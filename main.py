@@ -13,6 +13,8 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
+logging.getLogger("zerobus_sdk").setLevel(logging.WARNING)
+
 streamer = SalesforceZerobus(
     sf_object_channel=os.getenv(
         "SALESFORCE_CHANGE_EVENT_CHANNEL"
@@ -25,11 +27,10 @@ streamer = SalesforceZerobus(
     },
     databricks_auth={
         "workspace_url": os.getenv("DATABRICKS_WORKSPACE_URL"),
-        "api_token": os.getenv("DATABRICKS_API_TOKEN"),
+        "client_id": os.getenv("DATABRICKS_CLIENT_ID"),
+        "client_secret": os.getenv("DATABRICKS_CLIENT_SECRET"),
         "ingest_endpoint": os.getenv("DATABRICKS_INGEST_ENDPOINT"),
         "sql_endpoint": os.getenv("DATABRICKS_SQL_ENDPOINT"),
-        "sql_workspace_url": os.getenv("DATABRICKS_SQL_WORKSPACE_URL"),
-        "sql_api_token": os.getenv("DATABRICKS_SQL_API_TOKEN"),
     },
 )
 

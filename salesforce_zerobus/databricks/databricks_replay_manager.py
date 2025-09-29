@@ -8,6 +8,7 @@ Queries the existing Databricks table to find the latest replay_id for resuming 
 import logging
 import os
 import re
+import time
 from typing import Optional, Tuple
 
 import requests
@@ -21,10 +22,9 @@ class DatabricksReplayManager:
         table_name=None,
         object_name=None,
         workspace_url=None,
-        api_token=None,
+        client_id=None,
+        client_secret=None,
         sql_endpoint=None,
-        sql_workspace_url=None,
-        sql_api_token=None,
     ):
         self.object_name = object_name or "unknown"
         self.logger = logging.getLogger(f"{__name__}.{self.object_name}")
@@ -37,17 +37,15 @@ class DatabricksReplayManager:
             )
 
         self.workspace_url = workspace_url or os.getenv("DATABRICKS_WORKSPACE_URL")
-        self.api_token = api_token or os.getenv("DATABRICKS_API_TOKEN")
+        self.client_id = client_id or os.getenv("DATABRICKS_CLIENT_ID")
+        self.client_secret = client_secret or os.getenv("DATABRICKS_CLIENT_SECRET")
         self.sql_endpoint = sql_endpoint or os.getenv("DATABRICKS_SQL_ENDPOINT")
 
-        # Use sql_workspace_url if provided, otherwise fallback to main workspace_url
-        self.sql_workspace_url = sql_workspace_url or self.workspace_url
+        # Use main workspace URL for all operations
+        self.sql_workspace_url = self.workspace_url
 
-        # Use sql_api_token if provided, otherwise fallback to main api_token
-        self.sql_api_token = sql_api_token or self.api_token
-
-        if not all([self.workspace_url, self.api_token, self.sql_endpoint]):
-            raise ValueError("workspace_url, api_token, and sql_endpoint are required")
+        if not all([self.workspace_url, self.client_id, self.client_secret, self.sql_endpoint]):
+            raise ValueError("workspace_url, client_id, client_secret, and sql_endpoint are required")
 
         # Extract warehouse_id from sql_endpoint format: /sql/1.0/warehouses/{warehouse_id}
         match = re.search(r"/sql/1\.0/warehouses/([a-zA-Z0-9]+)", self.sql_endpoint)
@@ -58,9 +56,12 @@ class DatabricksReplayManager:
 
         self.warehouse_id = match.group(1)
 
-        # Setup request headers (use sql_api_token for SQL operations)
-        self.headers = {
-            "Authorization": f"Bearer {self.sql_api_token}",
+        # OAuth token management
+        self._oauth_token = None
+        self._oauth_token_expires_at = 0
+
+        # Base headers (authorization header will be added dynamically)
+        self._base_headers = {
             "Content-Type": "application/json",
         }
 
@@ -69,6 +70,84 @@ class DatabricksReplayManager:
         self._replay_id_fetched = False
 
         self.logger.info("Databricks replay manager initialized successfully")
+
+    def _generate_oauth_token(self) -> str:
+        """
+        Generate OAuth access token using Service Principal credentials.
+
+        Returns:
+            str: OAuth access token
+
+        Raises:
+            Exception: If token generation fails
+        """
+        try:
+            oauth_url = f"{self.sql_workspace_url.rstrip('/')}/oidc/v1/token"
+
+            payload = {
+                "grant_type": "client_credentials",
+                "scope": "all-apis"
+            }
+
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+
+            self.logger.debug(f"Requesting OAuth token from: {oauth_url}")
+
+            response = requests.post(
+                oauth_url,
+                data=payload,
+                headers=headers,
+                auth=(self.client_id, self.client_secret),
+                timeout=30
+            )
+
+            response.raise_for_status()
+            token_data = response.json()
+
+            access_token = token_data.get("access_token")
+            expires_in = token_data.get("expires_in", 3600)  # Default 1 hour
+
+            if not access_token:
+                raise ValueError("No access_token in OAuth response")
+
+            # Cache token with expiration (subtract 5 minutes for buffer)
+            self._oauth_token = access_token
+            self._oauth_token_expires_at = time.time() + expires_in - 300
+
+            self.logger.debug(f"OAuth token generated successfully, expires in {expires_in} seconds")
+            return access_token
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to generate OAuth token: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_details = e.response.json()
+                    self.logger.error(f"OAuth error response: {error_details}")
+                except:
+                    self.logger.error(f"OAuth error response text: {e.response.text}")
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error generating OAuth token: {e}")
+            raise
+
+    def _get_auth_headers(self) -> dict:
+        """
+        Get headers with valid OAuth token, refreshing if necessary.
+
+        Returns:
+            dict: Headers including Authorization with Bearer token
+        """
+        # Check if token needs refresh
+        if (not self._oauth_token or
+            time.time() >= self._oauth_token_expires_at):
+            self.logger.debug("OAuth token expired or missing, generating new token")
+            self._generate_oauth_token()
+
+        headers = self._base_headers.copy()
+        headers["Authorization"] = f"Bearer {self._oauth_token}"
+        return headers
 
     def execute_sql_query(self, query: str, timeout: int = 30) -> Optional[dict]:
         """
@@ -97,7 +176,7 @@ class DatabricksReplayManager:
 
             response = requests.post(
                 url,
-                headers=self.headers,
+                headers=self._get_auth_headers(),
                 json=payload,
                 timeout=timeout + 5,  # Add buffer to HTTP timeout
             )
@@ -403,5 +482,14 @@ def create_replay_manager_from_env(
     Raises:
         ValueError: If required environment variables are missing
         Exception: If initialization fails
+
+    Environment Variables:
+        Required:
+        - DATABRICKS_WORKSPACE_URL: Databricks workspace URL
+        - DATABRICKS_CLIENT_ID: OAuth Service Principal client ID
+        - DATABRICKS_CLIENT_SECRET: OAuth Service Principal client secret
+        - DATABRICKS_SQL_ENDPOINT: SQL warehouse endpoint
+        - DATABRICKS_TABLE_NAME: Target table name (if table_name param not provided)
+
     """
     return DatabricksReplayManager(table_name=table_name, object_name=object_name)
