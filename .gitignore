@@ -64,6 +64,10 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+#publishing:
+account_deleter.py
+account_publisher.py
+
 # Flask stuff:
 instance/
 .webassets-cache
