@@ -308,7 +308,7 @@ def main():
     try:
         # Create and start publisher
         publisher = AccountPublisher()
-        publisher.start_publishing(interval_seconds=60)
+        publisher.start_publishing(interval_seconds=5)
 
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
