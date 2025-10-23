@@ -1,0 +1,23 @@
+# MANIFEST.in - Specify additional files to include in the wheel package
+
+# Include documentation from package
+include spark_datasource/LICENSE
+include spark_datasource/README.md
+
+# Include requirements from package
+include spark_datasource/requirements.txt
+
+# Include protobuf files in new location
+recursive-include spark_datasource/proto *.py
+
+# Include utility modules in new location
+recursive-include spark_datasource/util *.py
+
+# Include all Python files in spark_datasource
+recursive-include spark_datasource *.py
+
+# Exclude unwanted files
+exclude .DS_Store
+recursive-exclude __pycache__ *
+recursive-exclude . *.pyc
+recursive-exclude . *.pyo 
