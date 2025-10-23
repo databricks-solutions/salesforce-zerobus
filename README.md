@@ -180,6 +180,74 @@ INFO - Received CustomObject__c DELETE 001def456abc789
 - Need to minimize data volume and processing
 - Want separate tables per object type
 
+## ⚡ Spark Structured Streaming Data Source
+
+### Bidirectional Streaming with Salesforce
+
+In addition to the Databricks Zerobus integration, this project includes a **Spark Data Source** for bidirectional streaming with Salesforce Platform Events and Change Data Capture (CDC).
+
+### Key Capabilities
+
+**📖 Reader (Subscription)**
+- Real-time streaming from Salesforce Platform Events and CDC
+- Automatic bitmap field decoding for change events
+- Configurable replay with exactly-once processing
+- Automatic schema management with Avro decoding
+
+**✍️ Writer (Publishing)**
+- Publish streaming data to Salesforce Platform Events
+- Event forwarding between Salesforce topics with transformations
+- Custom data publishing from any Spark streaming source
+- Batch optimization for high-volume scenarios
+
+### Quick Example
+
+```python
+from sfpubsub import register_data_source
+from pyspark.sql.functions import col, current_timestamp
+
+# Register the data source
+register_data_source(spark)
+
+# Read from Salesforce
+df = spark.readStream.format("salesforce_pubsub") \
+    .option("username", USERNAME) \
+    .option("password", PASSWORD) \
+    .option("topic", "/data/AccountChangeEvent") \
+    .option("replayPreset", "EARLIEST") \
+    .load()
+
+# Stream to Delta table
+df.writeStream \
+    .format("delta") \
+    .option("checkpointLocation", "/path/to/checkpoints/") \
+    .toTable("catalog.schema.salesforce_events")
+
+# Write back to Salesforce
+your_stream.writeStream \
+    .format("salesforce_pubsub") \
+    .option("username", USERNAME) \
+    .option("password", PASSWORD) \
+    .option("topic", "/data/CustomEvent__e") \
+    .start()
+```
+
+### When to Use Spark Data Source vs. Zerobus Library
+
+**Use Spark Data Source when:**
+- You need bidirectional streaming (read AND write to Salesforce)
+- Working with existing Spark Structured Streaming pipelines
+- Require complex transformations using Spark SQL/DataFrame APIs
+- Need to integrate with other Spark data sources
+
+**Use Zerobus Library when:**
+- You need simple, one-way streaming to Databricks Delta tables
+- Want minimal configuration and setup
+- Prefer lightweight Python applications
+- Need automatic table creation and replay recovery
+
+📖 **[View Full Spark Data Source Documentation →](spark_datasource/README.md)**
+
 ## 📋 Prerequisites & Local Setup
 
 ### 1. Salesforce Setup
