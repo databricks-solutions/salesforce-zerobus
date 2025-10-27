@@ -9,7 +9,7 @@ Usage:
     python build_wheel.py
     
 Output:
-    dist/sfpubsub-1.0.0-py3-none-any.whl
+    dist/spark_datasource-1.0.0-py3-none-any.whl
 """
 
 import os
@@ -54,20 +54,39 @@ def main():
     
     # Build the wheel
     print("\n🏗️ Building wheel package...")
+    
+    # Temporarily rename pyproject.toml to avoid conflicts with setup.py
+    pyproject_file = project_root / "pyproject.toml"
+    pyproject_backup = project_root / "pyproject.toml.bak"
+    renamed_pyproject = False
+    
     try:
+        if pyproject_file.exists():
+            print("   📝 Temporarily renaming pyproject.toml to avoid conflicts...")
+            pyproject_file.rename(pyproject_backup)
+            renamed_pyproject = True
+        
         result = subprocess.run([
             "python3", "setup.py", "bdist_wheel"
         ], capture_output=True, text=True, check=True)
         
         print("   ✅ Wheel built successfully!")
         if result.stdout:
-            print(f"   Output: {result.stdout.strip()}")
+            # Only show important output lines
+            for line in result.stdout.split('\n'):
+                if 'creating' in line.lower() and 'wheel' in line.lower():
+                    print(f"   {line.strip()}")
             
     except subprocess.CalledProcessError as e:
         print(f"   ❌ Build failed: {e}")
         if e.stderr:
             print(f"   Error: {e.stderr}")
         return False
+    finally:
+        # Restore pyproject.toml if it was renamed
+        if renamed_pyproject and pyproject_backup.exists():
+            print("   📝 Restoring pyproject.toml...")
+            pyproject_backup.rename(pyproject_file)
     
     # Check output
     print("\n📋 Build output:")
@@ -100,10 +119,10 @@ def main():
    - Add this script:
    
    #!/bin/bash
-   pip install /dbfs/tmp/wheels/spark-datasource-1.0.0-py3-none-any.whl
+   pip install /dbfs/tmp/wheels/spark_datasource-1.0.0-py3-none-any.whl
 
 3. Or install via notebook:
-   %pip install /dbfs/tmp/wheels/spark-datasource-1.0.0-py3-none-any.whl
+   %pip install /dbfs/tmp/wheels/spark_datasource-1.0.0-py3-none-any.whl
    dbutils.library.restartPython()
 
 4. Use in your notebook:
