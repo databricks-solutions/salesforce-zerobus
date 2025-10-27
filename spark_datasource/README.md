@@ -29,7 +29,7 @@ A comprehensive Spark data source for **bidirectional streaming** with Salesforc
 python build_wheel.py
 ```
 
-This creates: `dist/sfpubsub-1.0.0-py3-none-any.whl`
+This creates: `dist/spark_datasource-1.0.0-py3-none-any.whl`
 
 ### Step 2: Upload Wheel File to Databricks
 
@@ -43,13 +43,13 @@ Upload the wheel file to your workspace directory.
 
 **From Volume:**
 ```python
-%pip install /Volumes/path/wheels/sfpubsub-1.0.0-py3-none-any.whl
+%pip install /Volumes/path/wheels/spark_datasource-1.0.0-py3-none-any.whl
 dbutils.library.restartPython()
 ```
 
 **From Workspace:**
 ```python
-%pip install /Workspace/Users/your_email/wheels/sfpubsub-1.0.0-py3-none-any.whl
+%pip install /Workspace/Users/your_email/wheels/spark_datasource-1.0.0-py3-none-any.whl
 dbutils.library.restartPython()
 ```
 
@@ -58,7 +58,7 @@ dbutils.library.restartPython()
 #### 📖 Reading from Salesforce (Subscription)
 
 ```python
-from sfpubsub import register_data_source
+from spark_datasource import register_data_source
 from pyspark.sql.functions import col, current_timestamp
 
 # Set your credentials
@@ -265,7 +265,7 @@ console_query = processed_df.writeStream \
 **Package not found:**
 ```python
 # Check if package is installed
-%pip list | grep salesforce
+%pip list | grep spark-datasource
 
 # Restart Python after installation
 dbutils.library.restartPython()
@@ -275,7 +275,7 @@ dbutils.library.restartPython()
 ```python
 # Verify installation
 try:
-    from sfpubsub import register_data_source
+    from spark_datasource import register_data_source
     print("✅ Package installed correctly")
 except ImportError as e:
     print(f"❌ Package not found: {e}")

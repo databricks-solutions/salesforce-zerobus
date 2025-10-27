@@ -184,7 +184,7 @@ class SalesforcePubSubStreamReader(DataSourceStreamReader):
         if not self._client_initialized:
             try:
                 # Import client creation function locally to avoid serialization issues
-                from sfpubsub.PubSubAPIClient import create_client_from_options
+                from spark_datasource.PubSubAPIClient import create_client_from_options
                 
                 # Create client from options - this handles authentication automatically
                 self.client = create_client_from_options(self.options)
@@ -561,7 +561,7 @@ class SalesforcePubSubStreamWriter(DataSourceStreamWriter):
         """Initialize and authenticate the PubSub client."""
         if not self._client_initialized:
             try:
-                from sfpubsub.PubSubAPIClient import create_client_from_options
+                from spark_datasource.PubSubAPIClient import create_client_from_options
                 
                 self.client = create_client_from_options(self.options)
                 self._client_initialized = True
@@ -807,8 +807,8 @@ def register_salesforce_data_source(spark):
         spark: SparkSession instance
     
     Usage:
-        from sfpubsub.SalesforcePubSubDataSource import register_salesforce_data_source
-        register_salesforce_data_source(spark)
+        from spark_datasource import register_data_source
+        register_data_source(spark)
         
         # Then use in streaming:
         # Reading:

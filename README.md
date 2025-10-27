@@ -203,7 +203,7 @@ In addition to the Databricks Zerobus integration, this project includes a **Spa
 ### Quick Example
 
 ```python
-from sfpubsub import register_data_source
+from spark_datasource import register_data_source
 from pyspark.sql.functions import col, current_timestamp
 
 # Register the data source
