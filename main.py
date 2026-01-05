@@ -13,9 +13,10 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-logging.getLogger("zerobus_sdk").setLevel(logging.WARNING)
+logging.getLogger("zerobus_sdk").setLevel(logging.INFO)
 
 streamer = SalesforceZerobus(
+    auto_create_table=True,
     sf_object_channel=os.getenv(
         "SALESFORCE_CHANGE_EVENT_CHANNEL"
     ),  # Use "ChangeEvents" to get change events for ALL objects, otherwise specify a specific object like "AccountChangeEvent"
