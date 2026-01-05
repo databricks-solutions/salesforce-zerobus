@@ -9,14 +9,14 @@ import logging
 import os
 import time
 
-from zerobus_sdk import (
+from zerobus.sdk.shared import (
     StreamConfigurationOptions,
     StreamState,
     TableProperties,
     ZerobusException,
     get_zerobus_token,
 )
-from zerobus_sdk.aio import ZerobusSdk
+from zerobus.sdk.aio import ZerobusSdk
 
 from ..pubsub.proto import salesforce_events_pb2
 

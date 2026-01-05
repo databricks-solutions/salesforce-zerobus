@@ -12,7 +12,7 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 ![GitHub last commit](https://img.shields.io/github/last-commit/databricks-solutions/salesforce-zerobus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Reach out to your Databricks account team for private preview access to Databricks Zerobus!
+## Databricks Zerobus is now in Public Preview and available to all customers!
 
 ## Features
 
@@ -32,12 +32,12 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 ### Installation
 
 **Prerequisites:**
-1. Obtain the `databricks_zerobus-X.X.X-py3-none-any.whl` file from your Databricks account team
-2. Place the .whl file in the project root directory
+- Python 3.10 or higher
+- All dependencies are available via PyPI!
 
 **Install dependencies:**
 ```bash
-uv add databricks_zerobus-*.whl
+uv add databricks-zerobus-ingest-sdk
 uv sync
 ```
 
