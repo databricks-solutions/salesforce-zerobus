@@ -157,6 +157,75 @@ class PubSubAPIClient:
             print(f"Authentication error: {e}")
             return False
     
+    def authenticate_with_client_credentials(self, client_id, client_secret, 
+                                              login_url='https://login.salesforce.com'):
+        """
+        Authenticate using OAuth 2.0 Client Credentials flow.
+        
+        Requires a Connected App with Client Credentials flow enabled.
+        
+        Args:
+            client_id (str): Connected App Consumer Key
+            client_secret (str): Connected App Consumer Secret
+            login_url (str): Salesforce login URL
+            
+        Returns:
+            bool: True if authentication successful
+        """
+        try:
+            response = requests.post(
+                f'{login_url}/services/oauth2/token',
+                data={
+                    'grant_type': 'client_credentials',
+                    'client_id': client_id,
+                    'client_secret': client_secret
+                }
+            )
+            
+            if response.status_code == 200:
+                token_data = response.json()
+                self.session_token = token_data['access_token']
+                self.instance_url = token_data['instance_url']
+                
+                # Fetch tenant ID from userinfo endpoint
+                self.tenant_id = self._fetch_tenant_id()
+                
+                print(f"✅ OAuth Client Credentials authentication successful")
+                return True
+            else:
+                print(f"❌ Client credentials auth failed: {response.status_code}")
+                print(f"   Response: {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Client credentials auth error: {e}")
+            return False
+    
+    def _fetch_tenant_id(self):
+        """
+        Fetch tenant/org ID from Salesforce userinfo endpoint.
+        
+        Returns:
+            str: Organization ID (tenant ID)
+        """
+        try:
+            headers = {'Authorization': f'Bearer {self.session_token}'}
+            response = requests.get(
+                f'{self.instance_url}/services/oauth2/userinfo',
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                userinfo = response.json()
+                return userinfo.get('organization_id')
+            else:
+                raise RuntimeError(f"Failed to fetch tenant ID: {response.status_code}")
+                
+        except Exception as e:
+            print(f"⚠️ Could not fetch tenant ID: {e}")
+            # Fallback: return None, will need to be handled by caller
+            return None
+    
     def get_auth_metadata(self):
         """
         Get gRPC auth metadata for authenticated requests.
@@ -512,6 +581,10 @@ def create_client_from_options(options):
     """
     Create a PubSubAPIClient from Spark readStream options.
     
+    Supports multiple authentication methods:
+    - OAuth Client Credentials: clientId + clientSecret (preferred)
+    - Password: username + password (legacy)
+    
     Args:
         options (dict): Spark readStream options
         
@@ -521,22 +594,40 @@ def create_client_from_options(options):
     # Extract connection options
     grpc_host = options.get('grpcHost', 'api.pubsub.salesforce.com')
     grpc_port = int(options.get('grpcPort', 7443))
+    login_url = options.get('loginUrl', 'https://login.salesforce.com')
     
     # Create client
     client = PubSubAPIClient(grpc_host=grpc_host, grpc_port=grpc_port)
     
-    # Authenticate
+    # Check for OAuth Client Credentials (preferred)
+    client_id = options.get('clientId')
+    client_secret = options.get('clientSecret')
+    
+    if client_id and client_secret:
+        # Use OAuth Client Credentials flow
+        if not client.authenticate_with_client_credentials(
+            client_id=client_id,
+            client_secret=client_secret,
+            login_url=login_url
+        ):
+            raise RuntimeError("Failed to authenticate with Salesforce using OAuth Client Credentials")
+        return client
+    
+    # Fallback to password authentication (legacy)
     username = options.get('username')
     password = options.get('password')
-    login_url = options.get('loginUrl', 'https://login.salesforce.com')
     
-    if not username or not password:
-        raise ValueError("Username and password are required in options")
+    if username and password:
+        if not client.authenticate(username=username, password=password, login_url=login_url):
+            raise RuntimeError("Failed to authenticate with Salesforce using password")
+        return client
     
-    if not client.authenticate(username=username, password=password, login_url=login_url):
-        raise RuntimeError("Failed to authenticate with Salesforce")
-    
-    return client
+    # No valid credentials provided
+    raise ValueError(
+        "Authentication credentials required. Provide either:\n"
+        "  - clientId + clientSecret (OAuth Client Credentials), or\n"
+        "  - username + password (legacy)"
+    )
 
 
 def create_client(grpc_host='api.pubsub.salesforce.com', grpc_port=7443):
@@ -560,7 +651,15 @@ PubSubAPIClient - Parameterized Version
 
 Example usage:
 
-# Method 1: Direct instantiation
+# Method 1: OAuth Client Credentials (recommended)
+client = PubSubAPIClient('api.pubsub.salesforce.com', 7443)
+success = client.authenticate_with_client_credentials(
+    client_id='your-connected-app-consumer-key',
+    client_secret='your-connected-app-consumer-secret',
+    login_url='https://login.salesforce.com'
+)
+
+# Method 2: Password authentication (legacy)
 client = PubSubAPIClient('api.pubsub.salesforce.com', 7443)
 success = client.authenticate(
     username='your-username@example.com',
@@ -568,7 +667,17 @@ success = client.authenticate(
     login_url='https://login.salesforce.com'
 )
 
-# Method 2: From Spark options (recommended for Spark integration)
+# Method 3: From Spark options with OAuth (recommended for Spark integration)
+options = {
+    'clientId': 'your-connected-app-consumer-key',
+    'clientSecret': 'your-connected-app-consumer-secret',
+    'grpcHost': 'api.pubsub.salesforce.com',
+    'grpcPort': '7443',
+    'loginUrl': 'https://login.salesforce.com'
+}
+client = create_client_from_options(options)
+
+# Method 4: From Spark options with password (legacy)
 options = {
     'username': 'your-username@example.com',
     'password': 'your-password-and-token',
