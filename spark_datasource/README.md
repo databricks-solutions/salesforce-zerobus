@@ -21,6 +21,78 @@ A comprehensive Spark data source for **bidirectional streaming** with Salesforc
 - **Avro encoding** for proper Salesforce event format
 - **Error handling** with detailed logging and recovery
 
+## Authentication
+
+The data source supports two authentication methods:
+
+### 🔐 OAuth Client Credentials (Recommended)
+
+OAuth Client Credentials flow is the recommended authentication method. It uses a Connected App's Consumer Key and Secret instead of user passwords.
+
+**Salesforce Setup:**
+1. Create a **Connected App** in Salesforce (Setup → App Manager → New Connected App)
+2. Enable **OAuth Settings** with scopes: `api`, `cdp_api` (for PubSub API access)
+3. Enable **Client Credentials Flow**
+4. Set the **Run As** user under Client Credentials Flow policies
+5. Copy your **Consumer Key** and **Consumer Secret**
+
+**Usage:**
+```python
+from spark_datasource import register_data_source
+
+register_data_source(spark)
+
+df = spark.readStream.format("salesforce_pubsub") \
+    .option("clientId", "3MVG9...your_consumer_key") \
+    .option("clientSecret", "your_consumer_secret") \
+    .option("topic", "/data/AccountChangeEvent") \
+    .load()
+```
+
+**With Custom Login URL (for Scratch Orgs/My Domain):**
+```python
+df = spark.readStream.format("salesforce_pubsub") \
+    .option("clientId", "3MVG9...your_consumer_key") \
+    .option("clientSecret", "your_consumer_secret") \
+    .option("loginUrl", "https://your-domain.my.salesforce.com") \
+    .option("topic", "/data/AccountChangeEvent") \
+    .load()
+```
+
+### 🔑 Password Authentication (Legacy)
+
+Password authentication uses your Salesforce username and password + security token.
+
+**Usage:**
+```python
+df = spark.readStream.format("salesforce_pubsub") \
+    .option("username", "your-username@example.com") \
+    .option("password", "your-password-and-security-token") \
+    .option("topic", "/data/AccountChangeEvent") \
+    .load()
+```
+
+> **Note:** For password auth, concatenate your password with your security token: `password = "mypassword" + "securitytoken"`
+
+### Authentication Options Reference
+
+| Option | Description | Required |
+|--------|-------------|----------|
+| `clientId` | Connected App Consumer Key | Yes (OAuth) |
+| `clientSecret` | Connected App Consumer Secret | Yes (OAuth) |
+| `username` | Salesforce username | Yes (Password) |
+| `password` | Password + security token | Yes (Password) |
+| `loginUrl` | Login URL (default: `https://login.salesforce.com`) | No |
+
+**Login URL Examples:**
+| Environment | Login URL |
+|-------------|-----------|
+| Production | `https://login.salesforce.com` (default) |
+| Sandbox | `https://test.salesforce.com` |
+| My Domain / Scratch Org | `https://your-domain.my.salesforce.com` |
+
+---
+
 ## Installation on Databricks
 
 ### Step 1: Build the Wheel Package
@@ -176,8 +248,10 @@ The data source automatically decodes CDC bitmap fields into human-readable fiel
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `username` | Yes | - | Salesforce username |
-| `password` | Yes | - | Password + security token |
+| `clientId` | Yes* | - | Connected App Consumer Key (OAuth) |
+| `clientSecret` | Yes* | - | Connected App Consumer Secret (OAuth) |
+| `username` | Yes* | - | Salesforce username (Password auth) |
+| `password` | Yes* | - | Password + security token (Password auth) |
 | `topic` | No | `/data/AccountChangeEvent` | Platform Event topic |
 | `replayPreset` | No | `LATEST` | Replay preset (`EARLIEST`/`LATEST`) |
 | `replayId` | No | - | Specific replay ID to start from |
@@ -185,18 +259,24 @@ The data source automatically decodes CDC bitmap fields into human-readable fiel
 | `grpcHost` | No | `api.pubsub.salesforce.com` | PubSub API host |
 | `grpcPort` | No | `7443` | PubSub API port |
 
+*Provide either `clientId` + `clientSecret` (OAuth) OR `username` + `password` (legacy)
+
 ### ✍️ Writer Configuration (writeStream)
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `username` | Yes | - | Salesforce username |
-| `password` | Yes | - | Password + security token |
+| `clientId` | Yes* | - | Connected App Consumer Key (OAuth) |
+| `clientSecret` | Yes* | - | Connected App Consumer Secret (OAuth) |
+| `username` | Yes* | - | Salesforce username (Password auth) |
+| `password` | Yes* | - | Password + security token (Password auth) |
 | `topic` | Yes | - | Platform Event topic to publish to |
 | `batchSize` | No | `100` | Events per publish request |
 | `eventIdField` | No | - | Field to use as event ID (generates UUID if not specified) |
 | `loginUrl` | No | `https://login.salesforce.com` | Salesforce login URL |
 | `grpcHost` | No | `api.pubsub.salesforce.com` | PubSub API host |
 | `grpcPort` | No | `7443` | PubSub API port |
+
+*Provide either `clientId` + `clientSecret` (OAuth) OR `username` + `password` (legacy)
 
 ## Automatic Replay Management
 
@@ -283,6 +363,20 @@ except ImportError as e:
 
 ### Authentication Issues
 
+**OAuth Client Credentials:**
+- Verify Connected App has **Client Credentials Flow** enabled
+- Ensure the **Run As** user is set in Connected App policies
+- Check that OAuth scopes include `api` and `cdp_api`
+- For My Domain/Scratch Orgs, set `loginUrl` to your domain (e.g., `https://your-domain.my.salesforce.com`)
+- Test credentials with cURL:
+  ```bash
+  curl -X POST https://login.salesforce.com/services/oauth2/token \
+    -d "grant_type=client_credentials" \
+    -d "client_id=YOUR_CONSUMER_KEY" \
+    -d "client_secret=YOUR_CONSUMER_SECRET"
+  ```
+
+**Password Authentication:**
 - Ensure security token is concatenated with password: `password = "mypassword" + "securitytoken"`
 - Check username format (usually email address)
 - Verify Salesforce org has Pub/Sub API enabled

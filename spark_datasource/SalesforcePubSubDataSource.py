@@ -66,7 +66,15 @@ class SalesforcePubSubDataSource(DataSource):
     - Platform Events (read/write)
     - Custom Events (read/write)
     
-    Reading Usage:
+    Reading Usage (OAuth - recommended):
+        df = spark.readStream.format("salesforce_pubsub") \
+            .option("clientId", "your-connected-app-consumer-key") \
+            .option("clientSecret", "your-connected-app-consumer-secret") \
+            .option("topic", "/data/AccountChangeEvent") \
+            .option("replayPreset", "EARLIEST") \
+            .load()
+    
+    Reading Usage (Password - legacy):
         df = spark.readStream.format("salesforce_pubsub") \
             .option("username", "your-username@example.com") \
             .option("password", "your-password-and-token") \
@@ -76,15 +84,22 @@ class SalesforcePubSubDataSource(DataSource):
     
     Writing Usage:
         df.writeStream.format("salesforce_pubsub") \
-            .option("username", "your-username@example.com") \
-            .option("password", "your-password-and-token") \
+            .option("clientId", "your-connected-app-consumer-key") \
+            .option("clientSecret", "your-connected-app-consumer-secret") \
             .option("topic", "/event/MyPlatformEvent__e") \
             .option("checkpointLocation", "/tmp/checkpoint") \
             .start()
     
+    Authentication Options (provide one set):
+        OAuth Client Credentials (recommended):
+        - clientId: Connected App Consumer Key
+        - clientSecret: Connected App Consumer Secret
+        
+        Password (legacy):
+        - username: Salesforce username
+        - password: Salesforce password + security token
+    
     Common Options:
-        - username: Salesforce username (required)
-        - password: Salesforce password + security token (required)
         - topic: Salesforce topic path (required)
         - loginUrl: Salesforce login URL (default: https://login.salesforce.com)
         - grpcHost: PubSub API host (default: api.pubsub.salesforce.com)
@@ -149,9 +164,13 @@ class SalesforcePubSubStreamReader(DataSourceStreamReader):
         self.schema = schema
         self.options = options
         
-        # Required options
+        # Authentication options (OAuth or password)
         self.username = options.get("username")
-        self.password = options.get("password") 
+        self.password = options.get("password")
+        self.client_id = options.get("clientId")
+        self.client_secret = options.get("clientSecret")
+        
+        # Topic configuration
         self.topic = options.get("topic", "/data/AccountChangeEvent")
         
         # Optional options
@@ -163,9 +182,15 @@ class SalesforcePubSubStreamReader(DataSourceStreamReader):
         self.replay_preset = self._parse_replay_preset(options.get("replayPreset", "LATEST"))
         self.replay_id = options.get("replayId")  # Optional specific replay ID
         
-        # Validate required options
-        if not self.username or not self.password:
-            raise ValueError("Username and password are required options")
+        # Validate authentication - require either OAuth or password credentials
+        has_oauth = self.client_id and self.client_secret
+        has_password = self.username and self.password
+        if not has_oauth and not has_password:
+            raise ValueError(
+                "Authentication credentials required. Provide either:\n"
+                "  - clientId + clientSecret (OAuth Client Credentials), or\n"
+                "  - username + password (legacy)"
+            )
         
         # Client state (initialized lazily on worker nodes to avoid serialization issues)
         self.client = None
@@ -531,9 +556,13 @@ class SalesforcePubSubStreamWriter(DataSourceStreamWriter):
         self.options = options
         self.overwrite = overwrite
         
-        # Required options
+        # Authentication options (OAuth or password)
         self.username = options.get("username")
         self.password = options.get("password")
+        self.client_id = options.get("clientId")
+        self.client_secret = options.get("clientSecret")
+        
+        # Topic configuration
         self.topic = options.get("topic")
         
         # Optional options
@@ -545,9 +574,15 @@ class SalesforcePubSubStreamWriter(DataSourceStreamWriter):
         self.batch_size = int(options.get("batchSize", "100"))
         self.event_id_field = options.get("eventIdField")
         
-        # Validation
-        if not self.username or not self.password:
-            raise ValueError("Username and password are required options")
+        # Validate authentication - require either OAuth or password credentials
+        has_oauth = self.client_id and self.client_secret
+        has_password = self.username and self.password
+        if not has_oauth and not has_password:
+            raise ValueError(
+                "Authentication credentials required. Provide either:\n"
+                "  - clientId + clientSecret (OAuth Client Credentials), or\n"
+                "  - username + password (legacy)"
+            )
         if not self.topic:
             raise ValueError("Topic is required option")
         
