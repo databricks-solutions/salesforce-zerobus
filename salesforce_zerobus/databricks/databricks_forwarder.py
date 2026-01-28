@@ -64,7 +64,8 @@ class DatabricksForwarder:
         self.client_secret = client_secret
         self.table_name = table_name
 
-        # ZerobusSdk requires both server_endpoint and unity_catalog_url
+
+        # ZerobusSdk requires server_endpoint and unity_catalog_url as a named parameter
         self.sdk = ZerobusSdk(ingest_endpoint, unity_catalog_url=workspace_url)
 
         self.table_properties = TableProperties(
