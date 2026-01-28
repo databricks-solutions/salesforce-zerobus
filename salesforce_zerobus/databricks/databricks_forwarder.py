@@ -64,7 +64,8 @@ class DatabricksForwarder:
         self.client_secret = client_secret
         self.table_name = table_name
 
-        self.sdk = ZerobusSdk(ingest_endpoint)
+        # ZerobusSdk requires both server_endpoint and workspace_url (unity catalog endpoint)
+        self.sdk = ZerobusSdk(ingest_endpoint, workspace_url)
 
         self.table_properties = TableProperties(
             table_name, salesforce_events_pb2.SalesforceEvent.DESCRIPTOR
