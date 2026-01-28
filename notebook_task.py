@@ -24,6 +24,8 @@ salesforce_auth = {
     "username": "<your_salesforce_username>",
     "password": "<your_salesforce_password+security_token>",
     "instance_url": "<your_salesforce_instance_url>",
+    "client_id": "<your_salesforce_client_id>",
+    "client_secret": "<your_salesforce_client_secret>",
 }
 databricks_auth = {
     "workspace_url": "<your_databricks_workspace_url>",
