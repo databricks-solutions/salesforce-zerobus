@@ -88,6 +88,50 @@ if __name__ == "__main__":
     streamer.start()
 ```
 
+## Authentication
+
+The library supports two authentication methods:
+
+### OAuth 2.0 Client Credentials (Recommended)
+
+Uses Salesforce Connected App credentials for secure server-to-server authentication.
+
+```python
+salesforce_auth={
+    "client_id": "3MVG9...",         # Connected App Consumer Key
+    "client_secret": "12B82...",     # Connected App Consumer Secret
+    "instance_url": "https://your-instance.salesforce.com"
+}
+```
+
+**Setup:**
+1. Salesforce Setup → App Manager → New Connected App
+2. Enable OAuth Settings
+3. Enable "Client Credentials Flow"
+4. Add OAuth scopes:
+   - Manage Data Cloud ingestion API (cdp_ingest_api)
+   - Manage Data Cloud profile data (cdp_profile_api)
+   - Manage user data via APIs (api)
+   - Manage user data via Web browsers (web)
+   - Access all Data Cloud API resources (cdp_api)
+   - Perform requests at any time (refresh_token, offline_access)
+   - Full access (full)
+5. Copy Consumer Key (client_id) and Consumer Secret (client_secret)
+
+### SOAP Login (Legacy)
+
+Uses username, password, and security token for authentication.
+
+```python
+salesforce_auth={
+    "username": "user@company.com",
+    "password": "yourpassword+SECURITYTOKEN",  # No spaces
+    "instance_url": "https://your-instance.salesforce.com"
+}
+```
+
+The library automatically detects which method to use based on provided credentials.
+
 ### Expected Log Output
 
 When running, you'll see logs like this:
@@ -257,14 +301,29 @@ your_stream.writeStream \
 2. **Select objects** to monitor (Account, Lead, Contact, etc.)
 3. **Click Save** and wait 2-3 minutes for topics to become available
 
-#### Get Security Token
+#### Choose Authentication Method
+
+**Option A: OAuth 2.0 Client Credentials (Recommended)**
+
+1. **Setup** → **App Manager** → **New Connected App**
+2. Enable OAuth Settings
+3. Enable "Client Credentials Flow"
+4. Add OAuth scopes:
+   - Manage Data Cloud ingestion API (cdp_ingest_api)
+   - Manage Data Cloud profile data (cdp_profile_api)
+   - Manage user data via APIs (api)
+   - Manage user data via Web browsers (web)
+   - Access all Data Cloud API resources (cdp_api)
+   - Perform requests at any time (refresh_token, offline_access)
+   - Full access (full)
+5. Copy Consumer Key (client_id) and Consumer Secret (client_secret)
+
+**Option B: SOAP Login (Legacy)**
+
 1. **Setup** → **My Personal Information** → **Reset My Security Token**
 2. **Check your email** for the security token
 3. **Append to password**: `yourpassword` + `SECURITYTOKEN` (no spaces)
-
-#### Verify API Access
-- Ensure your user profile has **API Enabled** permission
-- Check that your org allows Pub/Sub API access
+4. Ensure your user profile has **API Enabled** permission
 
 ### 2. Databricks Setup
 
@@ -354,11 +413,20 @@ streamer = SalesforceZerobus(
     # Required parameters
     sf_object_channel="AccountChangeEvent", # Salesforce CDC channel (AccountChangeEvent, CustomObject__cChangeEvent, or ChangeEvents)
     databricks_table="catalog.schema.table",   # Target Databricks table
-    salesforce_auth={                      # Salesforce credentials dict
-        "username": "user@company.com",
-        "password": "password+token", 
+
+    # Option 1: OAuth 2.0 Authentication (Recommended)
+    salesforce_auth={
+        "client_id": "3MVG9...",
+        "client_secret": "12B82...",
         "instance_url": "https://company.salesforce.com"
     },
+
+    # Option 2: SOAP Authentication (Legacy)
+    # salesforce_auth={
+    #     "username": "user@company.com",
+    #     "password": "password+token",
+    #     "instance_url": "https://company.salesforce.com"
+    # },
     databricks_auth={                      # Databricks OAuth Service Principal
         "workspace_url": "https://workspace.cloud.databricks.com",
         "client_id": "your-service-principal-client-id",
