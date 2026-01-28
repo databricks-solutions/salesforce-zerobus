@@ -16,8 +16,7 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 
 ## Features
 
-- **🚀 Simple API** - Single class interface with just 4 required parameters
-- **⚡ Real-time Streaming** - Sub-second event forwarding to Databricks 
+- **Real-time Streaming** - Sub-second event forwarding to Databricks 
 - **Eliminates Message Buses** - With Databricks Zerobus you know longer need message buses to sink data to your lake.  
 - **Zero Data Loss** - Automatic replay recovery ensures no missed events during outages
 - **Production Ready** - Comprehensive error handling, health monitoring, and timeout protection
