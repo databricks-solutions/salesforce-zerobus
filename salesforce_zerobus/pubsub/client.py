@@ -93,6 +93,8 @@ def get_argument(key, argument_dict):
         "url": "SALESFORCE_URL",
         "username": "SALESFORCE_USERNAME",
         "password": "SALESFORCE_PASSWORD",
+        "client_id": "SALESFORCE_CLIENT_ID",
+        "client_secret": "SALESFORCE_CLIENT_SECRET",
         "grpcHost": "GRPC_HOST",
         "grpcPort": "GRPC_PORT",
         "apiVersion": "API_VERSION",
@@ -118,6 +120,8 @@ class PubSub(object):
         self.url = get_argument("url", argument_dict)
         self.username = get_argument("username", argument_dict)
         self.password = get_argument("password", argument_dict)
+        self.client_id = get_argument("client_id", argument_dict)
+        self.client_secret = get_argument("client_secret", argument_dict)
         self.metadata = None
         grpc_host = get_argument("grpcHost", argument_dict)
         grpc_port = get_argument("grpcPort", argument_dict)
@@ -547,7 +551,7 @@ class PubSub(object):
             self.stub = pb2_grpc.PubSubStub(intercepted_channel)
 
             # Re-authenticate to get fresh session token
-            self.auth()
+            self.authenticate()
 
             self.logger.info("Successfully recreated gRPC channel and authenticated")
             return True
@@ -605,6 +609,135 @@ class PubSub(object):
 
         # Validate header formats per Salesforce requirements
         self._validate_auth_headers()
+
+    def auth_soap(self):
+        """
+        Authenticate using SOAP Login (legacy method).
+
+        Uses username + password + security token to obtain a session token.
+        This is the traditional authentication method for Salesforce integrations.
+        """
+        # This is the original auth() method - just call it
+        self.auth()
+
+    def auth_oauth(self):
+        """
+        Authenticate using OAuth 2.0 Client Credentials flow.
+
+        More secure than SOAP login - recommended for production deployments.
+        Does not require user credentials, only connected app credentials.
+        Requires a Salesforce connected app with Client Credentials flow enabled.
+        """
+        token_url = f"{self.url}/services/oauth2/token"
+
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        try:
+            self.logger.debug(f"Requesting OAuth token from {token_url}")
+            response = requests.post(token_url, data=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+
+            data = response.json()
+
+            # Extract token and metadata
+            self.session_id = data.get("access_token")
+            # Update instance URL if provided (may differ from initial URL)
+            if data.get("instance_url"):
+                url_parts = urlparse(data.get("instance_url"))
+                self.url = f"{url_parts.scheme}://{url_parts.netloc}"
+
+            # OAuth tokens don't include org ID in response, need to fetch separately
+            self.tenant_id = self._fetch_org_id()
+
+            # Set metadata headers same format as SOAP
+            self.metadata = (
+                ("accesstoken", self.session_id),
+                ("instanceurl", self.url),
+                ("tenantid", self.tenant_id),
+            )
+
+            self._validate_auth_headers()
+
+            self.logger.info("OAuth authentication successful")
+
+        except requests.exceptions.HTTPError as e:
+            error_msg = f"OAuth authentication failed with status {e.response.status_code}"
+            if e.response.text:
+                try:
+                    error_data = e.response.json()
+                    error_msg += f": {error_data.get('error', 'unknown')} - {error_data.get('error_description', 'no description')}"
+                except:
+                    error_msg += f": {e.response.text[:200]}"
+            raise Exception(error_msg)
+        except Exception as e:
+            raise Exception(f"OAuth authentication failed: {e}")
+
+    def _fetch_org_id(self) -> str:
+        """
+        Fetch organization ID using current access token.
+
+        OAuth tokens don't include the org ID in the token response,
+        so we need to query it separately using the REST API.
+
+        Returns:
+            Organization ID (tenant ID)
+        """
+        try:
+            # Use identity URL from token response if available, or construct from instance URL
+            identity_url = f"{self.url}/services/oauth2/userinfo"
+
+            headers = {
+                "Authorization": f"Bearer {self.session_id}",
+                "Content-Type": "application/json"
+            }
+
+            response = requests.get(identity_url, headers=headers, timeout=30)
+            response.raise_for_status()
+
+            user_info = response.json()
+            org_id = user_info.get("organization_id")
+
+            if not org_id:
+                raise Exception("organization_id not found in userinfo response")
+
+            self.logger.debug(f"Fetched organization ID: {org_id}")
+            return org_id
+
+        except Exception as e:
+            self.logger.error(f"Failed to fetch organization ID: {e}")
+            raise Exception(f"Could not retrieve organization ID: {e}")
+
+    def authenticate(self):
+        """
+        Authenticate with Salesforce using available credentials.
+
+        Auto-detects authentication method based on provided credentials:
+        - If client_id + client_secret provided: OAuth 2.0 Client Credentials
+        - If username + password provided: SOAP Login
+
+        OAuth is preferred if both credential sets are provided.
+        """
+        has_oauth = self.client_id and self.client_secret
+        has_soap = self.username and self.password
+
+        if has_oauth:
+            self.logger.info("Authenticating with OAuth 2.0 Client Credentials")
+            self.auth_oauth()
+        elif has_soap:
+            self.logger.info("Authenticating with SOAP Login")
+            self.auth_soap()
+        else:
+            raise ValueError(
+                "No valid credentials provided for authentication. "
+                "Provide either (client_id, client_secret) for OAuth "
+                "or (username, password) for SOAP login."
+            )
 
     def release_subscription_semaphore(self):
         """
@@ -942,7 +1075,7 @@ class PubSub(object):
                 if e.code() == grpc.StatusCode.UNAUTHENTICATED:
                     self.logger.info("Authentication token expired, refreshing...")
                     try:
-                        self.auth()  # Re-authenticate
+                        self.authenticate()  # Re-authenticate
                         self.logger.info("Authentication refreshed successfully")
                     except Exception as auth_error:
                         self.logger.error(

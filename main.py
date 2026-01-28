@@ -21,9 +21,11 @@ streamer = SalesforceZerobus(
     ),  # Use "ChangeEvents" to get change events for ALL objects, otherwise specify a specific object like "AccountChangeEvent"
     databricks_table=os.getenv("DATABRICKS_ZEROBUS_TARGET_TABLE"),
     salesforce_auth={
-        "username": os.getenv("SALESFORCE_USERNAME"),
-        "password": os.getenv("SALESFORCE_PASSWORD"),
+        # "username": os.getenv("SALESFORCE_USERNAME"),
+        # "password": os.getenv("SALESFORCE_PASSWORD"),
         "instance_url": os.getenv("SALESFORCE_INSTANCE_URL"),
+        "client_id": os.getenv("SALESFORCE_CLIENT_ID"),
+        "client_secret": os.getenv("SALESFORCE_CLIENT_SECRET"),
     },
     databricks_auth={
         "workspace_url": os.getenv("DATABRICKS_WORKSPACE_URL"),

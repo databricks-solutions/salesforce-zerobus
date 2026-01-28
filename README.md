@@ -18,15 +18,15 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 
 - **🚀 Simple API** - Single class interface with just 4 required parameters
 - **⚡ Real-time Streaming** - Sub-second event forwarding to Databricks 
-- **⛔️ Eliminates Message Buses** - With Databricks Zerobus you know longer need message buses to sink data to your lake.  
-- **🔄 Zero Data Loss** - Automatic replay recovery ensures no missed events during outages
-- **🛡️ Production Ready** - Comprehensive error handling, health monitoring, and timeout protection
-- **🔐 OAuth Security** - Uses Service Principal authentication for enhanced security (API tokens deprecated)
-- **📦 Self-contained** - Bundles all dependencies (no external wheel dependencies)
-- **🔧 Flexible Configuration** - Support for all Salesforce objects (Account, Lead, Contact, Custom Objects)
-- **⚙️ Both Sync & Async** - Use blocking calls or async context manager patterns
-- **📊 Built-in Logging** - Detailed event processing logs for monitoring
-- **🧱 Databricks Asset Bundle** - Provided Databricks Asset Bundle to get you up and running in minutes
+- **Eliminates Message Buses** - With Databricks Zerobus you know longer need message buses to sink data to your lake.  
+- **Zero Data Loss** - Automatic replay recovery ensures no missed events during outages
+- **Production Ready** - Comprehensive error handling, health monitoring, and timeout protection
+- **OAuth Security** - Uses Service Principal authentication for enhanced security (API tokens deprecated)
+- **Self-contained** - Bundles all dependencies (no external wheel dependencies)
+- **Flexible Configuration** - Support for all Salesforce objects (Account, Lead, Contact, Custom Objects)
+- **Both Sync & Async** - Use blocking calls or async context manager patterns
+- **Built-in Logging** - Detailed event processing logs for monitoring
+- **Databricks Asset Bundle** - Provided Databricks Asset Bundle to get you up and running in minutes
 
 ## 🚀 Local Quick Start
 ### Installation
@@ -88,6 +88,50 @@ if __name__ == "__main__":
     streamer.start()
 ```
 
+## Authentication
+
+The library supports two authentication methods:
+
+### OAuth 2.0 Client Credentials (Recommended)
+
+Uses Salesforce Connected App credentials for secure server-to-server authentication.
+
+```python
+salesforce_auth={
+    "client_id": "3MVG9...",         # Connected App Consumer Key
+    "client_secret": "12B82...",     # Connected App Consumer Secret
+    "instance_url": "https://your-instance.salesforce.com"
+}
+```
+
+**Setup:**
+1. Salesforce Setup → App Manager → New Connected App
+2. Enable OAuth Settings
+3. Enable "Client Credentials Flow"
+4. Add OAuth scopes:
+   - Manage Data Cloud ingestion API (cdp_ingest_api)
+   - Manage Data Cloud profile data (cdp_profile_api)
+   - Manage user data via APIs (api)
+   - Manage user data via Web browsers (web)
+   - Access all Data Cloud API resources (cdp_api)
+   - Perform requests at any time (refresh_token, offline_access)
+   - Full access (full)
+5. Copy Consumer Key (client_id) and Consumer Secret (client_secret)
+
+### SOAP Login (Legacy)
+
+Uses username, password, and security token for authentication.
+
+```python
+salesforce_auth={
+    "username": "user@company.com",
+    "password": "yourpassword+SECURITYTOKEN",  # No spaces
+    "instance_url": "https://your-instance.salesforce.com"
+}
+```
+
+The library automatically detects which method to use based on provided credentials.
+
 ### Expected Log Output
 
 When running, you'll see logs like this:
@@ -128,7 +172,7 @@ async def main():
 asyncio.run(main())
 ```
 
-## 🌐 Multi-Object Streaming with ChangeEvents
+## Multi-Object Streaming with ChangeEvents
 
 ### Stream All Salesforce Objects at Once
 
@@ -151,10 +195,10 @@ streamer.start()
 
 ### Key Benefits
 
-- **🎯 Single Stream**: Capture Account, Contact, Lead, Opportunity, Custom Objects, etc. in one subscription
-- **🚀 Automatic Schema Handling**: Library automatically manages different schemas for each object type
-- **📊 Unified Table**: All events go to one Delta table with `entity_name` identifying the object type
-- **⚡ Efficient Caching**: Schemas are cached per object type for optimal performance
+- **Single Stream**: Capture Account, Contact, Lead, Opportunity, Custom Objects, etc. in one subscription
+- **Automatic Schema Handling**: Library automatically manages different schemas for each object type
+- **Unified Table**: All events go to one Delta table with `entity_name` identifying the object type
+- **Efficient Caching**: Schemas are cached per object type for optimal performance
 
 ### Understanding Multi-Object Data
 
@@ -180,7 +224,7 @@ INFO - Received CustomObject__c DELETE 001def456abc789
 - Need to minimize data volume and processing
 - Want separate tables per object type
 
-## ⚡ Spark Structured Streaming Data Source
+## Spark Structured Streaming Data Source
 
 ### Bidirectional Streaming with Salesforce
 
@@ -188,13 +232,13 @@ In addition to the Databricks Zerobus integration, this project includes a **Spa
 
 ### Key Capabilities
 
-**📖 Reader (Subscription)**
+**Reader (Subscription)**
 - Real-time streaming from Salesforce Platform Events and CDC
 - Automatic bitmap field decoding for change events
 - Configurable replay with exactly-once processing
 - Automatic schema management with Avro decoding
 
-**✍️ Writer (Publishing)**
+**Writer (Publishing)**
 - Publish streaming data to Salesforce Platform Events
 - Event forwarding between Salesforce topics with transformations
 - Custom data publishing from any Spark streaming source
@@ -246,9 +290,9 @@ your_stream.writeStream \
 - Prefer lightweight Python applications
 - Need automatic table creation and replay recovery
 
-📖 **[View Full Spark Data Source Documentation →](spark_datasource/README.md)**
+**[View Full Spark Data Source Documentation →](spark_datasource/README.md)**
 
-## 📋 Prerequisites & Local Setup
+## Prerequisites & Local Setup
 
 ### 1. Salesforce Setup
 
@@ -257,14 +301,29 @@ your_stream.writeStream \
 2. **Select objects** to monitor (Account, Lead, Contact, etc.)
 3. **Click Save** and wait 2-3 minutes for topics to become available
 
-#### Get Security Token
+#### Choose Authentication Method
+
+**Option A: OAuth 2.0 Client Credentials (Recommended)**
+
+1. **Setup** → **App Manager** → **New Connected App**
+2. Enable OAuth Settings
+3. Enable "Client Credentials Flow"
+4. Add OAuth scopes:
+   - Manage Data Cloud ingestion API (cdp_ingest_api)
+   - Manage Data Cloud profile data (cdp_profile_api)
+   - Manage user data via APIs (api)
+   - Manage user data via Web browsers (web)
+   - Access all Data Cloud API resources (cdp_api)
+   - Perform requests at any time (refresh_token, offline_access)
+   - Full access (full)
+5. Copy Consumer Key (client_id) and Consumer Secret (client_secret)
+
+**Option B: SOAP Login (Legacy)**
+
 1. **Setup** → **My Personal Information** → **Reset My Security Token**
 2. **Check your email** for the security token
 3. **Append to password**: `yourpassword` + `SECURITYTOKEN` (no spaces)
-
-#### Verify API Access
-- Ensure your user profile has **API Enabled** permission
-- Check that your org allows Pub/Sub API access
+4. Ensure your user profile has **API Enabled** permission
 
 ### 2. Databricks Setup
 
@@ -279,33 +338,7 @@ your_stream.writeStream \
    - Table access permissions for your target Delta table
    - Workspace permissions for SQL operations
 
-#### 🔐 OAuth vs API Tokens (Migration Guide)
-
-**For users migrating from API tokens:**
-- **Enhanced Security**: OAuth tokens auto-refresh every hour vs. static API tokens
-- **Unified Authentication**: Single Service Principal for all Databricks operations
-- **Simplified Configuration**: No separate SQL API tokens needed
-- **Future-Proof**: Databricks recommends OAuth for 2025+ (API tokens being deprecated)
-
-**Migration steps:**
-1. Create Service Principal (steps above)
-2. Update environment variables:
-   ```bash
-   # Replace these:
-   # DATABRICKS_API_TOKEN=dapi...
-   # DATABRICKS_SQL_API_TOKEN=dapi...
-
-   # With these:
-   DATABRICKS_CLIENT_ID=your-service-principal-client-id
-   DATABRICKS_CLIENT_SECRET=your-service-principal-client-secret
-   ```
-3. Update ingest endpoint format:
-   ```bash
-   # Change from: workspace-id.ingest.region.cloud.databricks.com
-   # To:         workspace-id.zerobus.region.cloud.databricks.com
-   ```
-
-#### 🚨 Table Configuration
+#### Table Configuration
 If you do not create the table before running the service, a table will be made for you using the name specified in main.py. This step is optional.
 
 🚨 **Important**: `'delta.enableRowTracking' = 'false'` must be set for all Zerobus target tables.
@@ -345,7 +378,7 @@ COMMENT 'Real-time Salesforce Change Data Capture events';
 - **Workspace URL**: Your Databricks workspace URL (e.g., `https://workspace.cloud.databricks.com`)
 - **Ingest Endpoint**: Found in workspace settings (format: `workspace-id.ingest.cloud.databricks.com`)
 
-## ⚙️ Configuration Options
+## Configuration Options
 
 ### Complete Configuration Example
 
@@ -354,11 +387,20 @@ streamer = SalesforceZerobus(
     # Required parameters
     sf_object_channel="AccountChangeEvent", # Salesforce CDC channel (AccountChangeEvent, CustomObject__cChangeEvent, or ChangeEvents)
     databricks_table="catalog.schema.table",   # Target Databricks table
-    salesforce_auth={                      # Salesforce credentials dict
-        "username": "user@company.com",
-        "password": "password+token", 
+
+    # Option 1: OAuth 2.0 Authentication (Recommended)
+    salesforce_auth={
+        "client_id": "3MVG9...",
+        "client_secret": "12B82...",
         "instance_url": "https://company.salesforce.com"
     },
+
+    # Option 2: SOAP Authentication (Legacy)
+    # salesforce_auth={
+    #     "username": "user@company.com",
+    #     "password": "password+token",
+    #     "instance_url": "https://company.salesforce.com"
+    # },
     databricks_auth={                      # Databricks OAuth Service Principal
         "workspace_url": "https://workspace.cloud.databricks.com",
         "client_id": "your-service-principal-client-id",
@@ -418,24 +460,24 @@ Works with any Salesforce object that has Change Data Capture enabled:
 #### Custom Objects
 - Any custom object with CDC enabled (e.g., `CustomObject__c`)
 
-## 🏗️ Automatic Table Creation & Historical Backfill
+## Automatic Table Creation & Historical Backfill
 
 ### Smart Table Management
 
 The library automatically handles Databricks table creation and historical data backfill:
 
 **New Deployment (Table Doesn't Exist)**:
-- ✅ **Auto-creates** Delta table with optimized CDC schema
-- 🕰️ **Historical Backfill**: Starts from `EARLIEST` to capture all historical events
-- 📊 **Optimized Schema**: Includes partitioning and auto-compaction
+- **Auto-creates** Delta table with optimized CDC schema
+- **Historical Backfill**: Starts from `EARLIEST` to capture all historical events
+- **Optimized Schema**: Includes partitioning and auto-compaction
 
 **Existing Deployment (Table Exists)**:
-- 🔄 **Resume**: Continues from last processed `replay_id` using zero-loss recovery
-- ⚡ **Fast Startup**: Uses cached replay position for immediate streaming
+- **Resume**: Continues from last processed `replay_id` using zero-loss recovery
+- **Fast Startup**: Uses cached replay position for immediate streaming
 
 **Empty Table (Created but No Data)**:
-- 🕰️ **Backfill Mode**: Starts from `EARLIEST` to capture historical events
-- 📈 **Progressive Load**: Processes events chronologically from the beginning
+- **Backfill Mode**: Starts from `EARLIEST` to capture historical events
+- **Progressive Load**: Processes events chronologically from the beginning
 
 ### Configuration Options
 
@@ -454,10 +496,10 @@ streamer = SalesforceZerobus(
 ### Example Scenarios
 
 **Scenario 1: Fresh Deployment**
-```bash
-INFO - Table catalog.schema.account_events doesn't exist - creating and configuring for historical backfill
-INFO - Successfully created table: catalog.schema.account_events  
-INFO - Starting historical backfill from EARLIEST (this may take time for large orgs)
+```
+INFO - Table catalog.schema.account_events does not exist - creating and configuring for historical backfill
+INFO - Successfully created table: catalog.schema.account_events
+INFO - Starting historical backfill from EARLIEST (this may take time with large orgs)
 ```
 
 **Scenario 2: Service Restart**
@@ -473,11 +515,11 @@ INFO - Starting fresh subscription from LATEST
 ```
 
 **Scenario 4: Successful Auto-Creation & Backfill**
-```bash
-INFO - Table catalog.schema.account_events doesn't exist - creating and configuring for historical backfill
+```
+INFO - Table catalog.schema.account_events does not exist - creating and configuring for historical backfill
 INFO - Creating Databricks table: catalog.schema.account_events
 INFO - Successfully created table: catalog.schema.account_events
-INFO - Starting historical backfill from EARLIEST (this may take time for large orgs)
+INFO - Starting historical backfill from EARLIEST (this may take time with large orgs)
 INFO - Stream created. Stream ID: 787040db-804a-40b4-a721-941f9220853a
 INFO - Initialized stream to table: catalog.schema.account_events
 INFO - Received Account DELETE 001abc123...
@@ -485,7 +527,7 @@ INFO - Written to Databricks: catalog.schema.account_events - Account DELETE 001
 ```
 
 
-## 🔄 Zero Data Loss Recovery
+## Zero Data Loss Recovery
 
 ### How It Works
 
@@ -509,7 +551,7 @@ INFO - Resuming from previous session with replay_id: 00000000000408760000
 INFO - Subscription mode: CUSTOM
 ```
 
-## 📊 Monitoring & Health
+## Monitoring & Health
 
 ### Built-in Health Monitoring
 
@@ -541,7 +583,7 @@ INFO - Queue status: 2 events pending
 - **Replay lag**: How far behind real-time we are
 - **Error rates**: Failed event processing attempts
 
-## 🎯 Data Schema & Output
+## Data Schema & Output
 
 ### Delta Table Schema
 
@@ -616,10 +658,10 @@ for salesforce_object in salesforce_objects:
 
 ### Benefits of Schema-Based Parsing
 
-- ✅ **Automatic Schema Evolution**: Handles new fields added to Salesforce objects
-- ✅ **Type Safety**: Preserves Avro data types vs. JSON string conversion
-- ✅ **Performance**: More efficient than JSON parsing for large datasets
-- ✅ **Field-Level Access**: Direct access to individual Salesforce fields as columns
+- **Automatic Schema Evolution**: Handles new fields added to Salesforce objects
+- **Type Safety**: Preserves Avro data types vs. JSON string conversion
+- **Performance**: More efficient than JSON parsing for large datasets
+- **Field-Level Access**: Direct access to individual Salesforce fields as columns
 
 
 ### Regenerating Protocol Buffer Files
@@ -647,11 +689,11 @@ python -m grpc_tools.protoc \
 # - salesforce_events_pb2_grpc.py (event service stubs)
 ```
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### Common Issues & Solutions
 
-#### ❌ Authentication Error: "SOAP request failed with status 500"
+#### Authentication Error: "SOAP request failed with status 500"
 
 **Causes & Fixes:**
 - **Expired Security Token**: Reset token in Salesforce Setup → My Personal Information → Reset Security Token
@@ -659,14 +701,14 @@ python -m grpc_tools.protoc \
 - **Wrong Instance URL**: Use the exact URL from your browser after logging into Salesforce
 - **API Access Disabled**: Check user profile has "API Enabled" permission
 
-#### ❌ Permission Denied: "INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY"
+#### Permission Denied: "INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY"
 
 **Fixes:**
 - Enable Pub/Sub API access for your user
 - Verify CDC is enabled for the target object
 - Check your user has read access to the object
 
-#### ❌ Table Not Found: "Table 'catalog.schema.table' doesn't exist"
+#### Table Not Found: "Table 'catalog.schema.table' doesn't exist"
 
 **With Auto-Creation Enabled (Default):**
 The library should automatically create tables. If this error persists:
@@ -680,9 +722,9 @@ The library should automatically create tables. If this error persists:
 - Check your Databricks permissions for the catalog/schema
 
 **Troubleshooting Auto-Creation:**
-```bash
+```
 # Check if auto-creation is working
-INFO - Table catalog.schema.table doesn't exist - creating and configuring for historical backfill
+INFO - Table catalog.schema.table does not exist - creating and configuring for historical backfill
 INFO - Creating Databricks table: catalog.schema.table
 INFO - Successfully created table: catalog.schema.table
 
@@ -691,7 +733,7 @@ ERROR - Failed to create table: catalog.schema.table - table does not exist afte
 # Check your Databricks SQL endpoint permissions and catalog access
 ```
 
-#### ❌ Databricks Stream Error: "Failed to open table for write (Error code 1022)"
+#### Databricks Stream Error: "Failed to open table for write (Error code 1022)"
 
 **Root Cause:**
 This error can occur when the table schema is incompatible with the Databricks Zerobus API.
