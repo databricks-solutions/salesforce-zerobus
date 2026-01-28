@@ -14,7 +14,6 @@ from zerobus.sdk.shared import (
     StreamState,
     TableProperties,
     ZerobusException,
-    get_zerobus_token,
 )
 from zerobus.sdk.aio import ZerobusSdk
 
@@ -43,10 +42,10 @@ class DatabricksForwarder:
 
         Args:
             ingest_endpoint: Databricks ingest endpoint
-            workspace_url: Databricks workspace URL
-            client_id: OAuth Service Principal client ID
-            client_secret: OAuth Service Principal client secret
-            table_name: Target Delta table name
+            workspace_url: Databricks workspace URL (Unity Catalog URL)
+            client_id: OAuth 2.0 Service Principal client ID
+            client_secret: OAuth 2.0 Service Principal client secret
+            table_name: Target Delta table name (fully qualified: catalog.schema.table)
             stream_config_options: Optional dict of ZerobusSdk stream configuration options
                 Available options (recovery is always enabled):
                 - max_inflight_records (int): Max records in flight (default: 50,000)
@@ -57,6 +56,7 @@ class DatabricksForwarder:
                 - flush_timeout_ms (int): Stream flush timeout (default: 300,000ms)
                 - ack_callback (callable): Acknowledgment callback function (default: debug logging)
                 Note: recovery is always True for maximum reliability
+                Note: OAuth credentials are passed directly to create_stream(), not via token_factory
         """
         self.ingest_endpoint = ingest_endpoint
         self.workspace_url = workspace_url
@@ -64,7 +64,8 @@ class DatabricksForwarder:
         self.client_secret = client_secret
         self.table_name = table_name
 
-        self.sdk = ZerobusSdk(ingest_endpoint)
+        # ZerobusSdk requires both server_endpoint and unity_catalog_url
+        self.sdk = ZerobusSdk(ingest_endpoint, unity_catalog_url=workspace_url)
 
         self.table_properties = TableProperties(
             table_name, salesforce_events_pb2.SalesforceEvent.DESCRIPTOR
@@ -92,14 +93,8 @@ class DatabricksForwarder:
         if "ack_callback" not in final_config:
             final_config["ack_callback"] = self._default_ack_callback
 
-        # Add OAuth token factory for authentication
-        final_config["token_factory"] = lambda: get_zerobus_token(
-            self.table_name,
-            self.ingest_endpoint.split(".")[0],
-            self.workspace_url,
-            self.client_id,
-            self.client_secret
-        )
+        # Note: OAuth credentials (client_id, client_secret) are passed directly to
+        # create_stream() method, not via token_factory in the configuration
 
         self.stream_config = StreamConfigurationOptions(**final_config)
 
@@ -130,8 +125,12 @@ class DatabricksForwarder:
     async def initialize_stream(self):
         """Create the ingest stream to the Delta table."""
         try:
+            # Pass OAuth credentials directly to create_stream (per SDK best practices)
             self.stream = await self.sdk.create_stream(
-                self.table_properties, self.stream_config
+                self.client_id,
+                self.client_secret,
+                self.table_properties,
+                self.stream_config
             )
             self.logger.info(f"Initialized Zerobus stream to table: {self.table_name}")
         except Exception as e:

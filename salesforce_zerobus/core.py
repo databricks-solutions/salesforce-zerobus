@@ -193,15 +193,34 @@ class SalesforceZerobus:
         if not databricks_table:
             raise ValueError("databricks_table parameter is required")
 
-        # Validate Salesforce auth
-        required_sf_keys = ["username", "password", "instance_url"]
-        missing_sf = [
-            k
-            for k in required_sf_keys
-            if k not in salesforce_auth or not salesforce_auth[k]
-        ]
-        if missing_sf:
-            raise ValueError(f"Missing required Salesforce auth keys: {missing_sf}")
+        # Validate Salesforce auth - support both OAuth and SOAP authentication
+        has_oauth = (
+            "client_id" in salesforce_auth
+            and "client_secret" in salesforce_auth
+            and salesforce_auth.get("client_id")
+            and salesforce_auth.get("client_secret")
+        )
+
+        has_soap = (
+            "username" in salesforce_auth
+            and "password" in salesforce_auth
+            and salesforce_auth.get("username")
+            and salesforce_auth.get("password")
+        )
+
+        has_instance = (
+            "instance_url" in salesforce_auth and salesforce_auth.get("instance_url")
+        )
+
+        if not has_instance:
+            raise ValueError("salesforce_auth must include 'instance_url'")
+
+        if not (has_oauth or has_soap):
+            raise ValueError(
+                "salesforce_auth must include either:\n"
+                "  - OAuth: 'client_id' and 'client_secret'\n"
+                "  - SOAP: 'username' and 'password'"
+            )
 
         # Validate Databricks auth
         required_db_keys = [
@@ -234,8 +253,6 @@ class SalesforceZerobus:
         # Initialize PubSub client
         pubsub_args = {
             "url": self.salesforce_auth["instance_url"],
-            "username": self.salesforce_auth["username"],
-            "password": self.salesforce_auth["password"],
             "grpcHost": self.grpc_host,
             "grpcPort": str(self.grpc_port),
             "apiVersion": self.api_version,
@@ -243,6 +260,16 @@ class SalesforceZerobus:
             "batchSize": str(self.batch_size),
             "timeout_seconds": self.timeout_seconds,
         }
+
+        # Add OAuth credentials if present
+        if "client_id" in self.salesforce_auth:
+            pubsub_args["client_id"] = self.salesforce_auth["client_id"]
+            pubsub_args["client_secret"] = self.salesforce_auth["client_secret"]
+
+        # Add SOAP credentials if present
+        if "username" in self.salesforce_auth:
+            pubsub_args["username"] = self.salesforce_auth["username"]
+            pubsub_args["password"] = self.salesforce_auth["password"]
 
         self._pubsub_client = PubSub(pubsub_args)
         self._pubsub_client.set_flow_controller(self._flow_controller)
@@ -540,7 +567,7 @@ class SalesforceZerobus:
 
         try:
             self.logger.info("Authenticating with Salesforce...")
-            self._pubsub_client.auth()
+            self._pubsub_client.authenticate()
             self.logger.info("Authentication successful!")
             self.logger.info("Initializing Databricks connection...")
             self.background_loop = asyncio.new_event_loop()
@@ -715,7 +742,7 @@ class SalesforceZerobus:
         self._initialize_components()
 
         self.logger.info("Authenticating with Salesforce...")
-        self._pubsub_client.auth()
+        self._pubsub_client.authenticate()
         self.logger.info("Authentication successful!")
 
         await self._initialize_databricks_async()
