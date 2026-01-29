@@ -132,7 +132,7 @@ class PubSub(object):
         self._grpc_port = grpc_port
 
         # Store timeout configuration (centralized from core.py)
-        self.timeout_seconds = float(argument_dict.get("timeout_seconds", 45.0))
+        self.timeout_seconds = float(argument_dict.get("timeout_seconds", 50.0))
 
         # Connection resilience settings
         self.max_retries = 5
@@ -144,7 +144,7 @@ class PubSub(object):
             (
                 "grpc.keepalive_time_ms",
                 60000,
-            ),  # Send keepalive every 60 seconds (less aggressive)
+            ),  # Send keepalive every 60 seconds (aligns with Salesforce 60s requirement)
             (
                 "grpc.keepalive_timeout_ms",
                 10000,
@@ -160,12 +160,12 @@ class PubSub(object):
             ),  # Min 30 seconds between pings
             (
                 "grpc.http2.min_ping_interval_without_data_ms",
-                300000,
-            ),  # 5 minutes without data before ping
+                30000,
+            ),  # 30 seconds without data before ping
             (
                 "grpc.max_connection_idle_ms",
-                1800000,
-            ),  # Keep connection for 30 minutes when idle
+                7200000,
+            ),  # Keep connection for 2 hours when idle
         ]
 
         # Create channel with trace interceptor
@@ -512,7 +512,7 @@ class PubSub(object):
                 (
                     "grpc.keepalive_time_ms",
                     60000,
-                ),  # Send keepalive every 60 seconds (less aggressive)
+                ),  # Send keepalive every 60 seconds (aligns with Salesforce 60s requirement)
                 (
                     "grpc.keepalive_timeout_ms",
                     10000,
@@ -531,12 +531,12 @@ class PubSub(object):
                 ),  # Min 30 seconds between pings
                 (
                     "grpc.http2.min_ping_interval_without_data_ms",
-                    300000,
-                ),  # 5 minutes without data before ping
+                    30000,
+                ),  # 30 seconds without data before ping
                 (
                     "grpc.max_connection_idle_ms",
-                    1800000,
-                ),  # Keep connection for 30 minutes when idle
+                    7200000,
+                ),  # Keep connection for 2 hours when idle
             ]
 
             channel = grpc.secure_channel(

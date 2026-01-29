@@ -77,7 +77,7 @@ class DatabricksForwarder:
         default_config = {
             "recovery": True,  # Always enable recovery
             "recovery_retries": 5,  # Increased for production resilience
-            "recovery_timout_ms": 15000,  # 15 seconds per attempt (faster recovery)
+            "recovery_timeout_ms": 15000,  # 15 seconds per recovery attempt (faster than default 30s)
             "recovery_backoff_ms": 5000,  # 5 second backoff
             "server_lack_of_ack_timeout_ms": 180000,  # 3 minutes (increased from 1 minute)
             "max_inflight_records": 50000,  # Conservative for reliability (reduced from 50k)
@@ -224,7 +224,8 @@ class DatabricksForwarder:
             # Per Zerobus docs: ZerobusException means stream permanently failed after all SDK recovery attempts
             # Client is responsible for handling the failure using recreate_stream()
             self.logger.warning(
-                f"Stream permanently failed after SDK recovery attempts, recreating: {e}"
+                f"Stream permanently failed after SDK recovery attempts, recreating. Error: {e}. "
+                f"This may be cascading from Salesforce connection issues if they occurred recently."
             )
 
             try:
@@ -345,9 +346,9 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
     if os.getenv("ZEROBUS_RECOVERY_RETRIES"):
         stream_config["recovery_retries"] = int(os.getenv("ZEROBUS_RECOVERY_RETRIES"))
 
-    if os.getenv("ZEROBUS_RECOVERY_TIMOUT_MS"):
-        stream_config["recovery_timout_ms"] = int(
-            os.getenv("ZEROBUS_RECOVERY_TIMOUT_MS")
+    if os.getenv("ZEROBUS_RECOVERY_TIMEOUT_MS"):
+        stream_config["recovery_timeout_ms"] = int(
+            os.getenv("ZEROBUS_RECOVERY_TIMEOUT_MS")
         )
 
     if os.getenv("ZEROBUS_RECOVERY_BACKOFF_MS"):

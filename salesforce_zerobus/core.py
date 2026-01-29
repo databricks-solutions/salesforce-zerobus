@@ -68,7 +68,7 @@ class SalesforceZerobus:
         databricks_auth: Dict[str, str] = None,
         batch_size: int = 10,
         enable_replay_recovery: bool = True,
-        timeout_seconds: float = 45.0,
+        timeout_seconds: float = 50.0,
         max_timeouts: int = 2,
         grpc_host: str = "api.pubsub.salesforce.com",
         grpc_port: int = 7443,
@@ -156,7 +156,7 @@ class SalesforceZerobus:
         self.zerobus_config = {
             "max_inflight_records": zerobus_max_inflight_records,
             "recovery_retries": zerobus_recovery_retries,
-            "recovery_timout_ms": zerobus_recovery_timeout_ms,
+            "recovery_timeout_ms": zerobus_recovery_timeout_ms,
             "recovery_backoff_ms": zerobus_recovery_backoff_ms,
             "server_lack_of_ack_timeout_ms": zerobus_server_ack_timeout_ms,
             "flush_timeout_ms": zerobus_flush_timeout_ms,
