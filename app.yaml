@@ -28,7 +28,7 @@ env:
   #   value: '120000'
   # - name: 'ZEROBUS_RECOVERY_RETRIES' # Optional
   #   value: '5'
-  # - name: 'ZEROBUS_RECOVERY_TIMOUT_MS' # Optional
+  # - name: 'ZEROBUS_RECOVERY_TIMEOUT_MS' # Optional
   #   value: '10000'
   # - name: 'ZEROBUS_RECOVERY_BACKOFF_MS' # Optional
   #   value: '3000'
