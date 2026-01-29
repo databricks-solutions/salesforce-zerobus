@@ -80,11 +80,11 @@ class FlowController:
                 self.consecutive_timeouts += 1
                 self.total_timeouts += 1
 
-            # Only warn after multiple timeouts - single timeouts are normal for idle streams
-            if self.consecutive_timeouts >= 2:
+            # Only warn after multiple timeouts - single/double timeouts are normal for idle streams
+            if self.consecutive_timeouts >= self.max_consecutive_timeouts:
                 self.logger.warning(
                     f"Multiple semaphore timeouts #{self.consecutive_timeouts} "
-                    f"(waited {effective_timeout}s). Stream may be experiencing issues or high latency."
+                    f"(waited {effective_timeout}s). Normal for idle streams."
                 )
             else:
                 self.logger.debug(

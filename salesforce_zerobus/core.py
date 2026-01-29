@@ -69,7 +69,7 @@ class SalesforceZerobus:
         batch_size: int = 10,
         enable_replay_recovery: bool = True,
         timeout_seconds: float = 50.0,
-        max_timeouts: int = 2,
+        max_timeouts: int = 3,
         grpc_host: str = "api.pubsub.salesforce.com",
         grpc_port: int = 7443,
         api_version: str = "57.0",
