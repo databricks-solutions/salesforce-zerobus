@@ -1,5 +1,3 @@
-# This file is for local testing of the Salesforce Zerobus functionality, to run in a databricks job, use notebook_task.py
-
 import logging
 import os
 
