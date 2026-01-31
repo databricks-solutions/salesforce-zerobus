@@ -541,6 +541,17 @@ class SalesforceZerobus:
                                 self.logger.warning(
                                     f"Zerobus stream unhealthy: {zerobus_health['status']}"
                                 )
+
+                                # Proactively recreate failed streams instead of waiting for next event
+                                if zerobus_health["status"] == "failed" and self._databricks_forwarder.stream:
+                                    self.logger.info("Proactively recreating failed Zerobus stream...")
+                                    try:
+                                        self._databricks_forwarder.stream = await self._databricks_forwarder.sdk.recreate_stream(
+                                            self._databricks_forwarder.stream
+                                        )
+                                        self.logger.info("Successfully recreated failed stream proactively")
+                                    except Exception as recreate_error:
+                                        self.logger.error(f"Failed to recreate stream proactively: {recreate_error}")
                             else:
                                 self.logger.debug(
                                     f"Zerobus stream healthy: {zerobus_health['status']}"

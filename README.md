@@ -13,6 +13,10 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Databricks Zerobus is now in Public Preview and available to all customers!
+## We want to hear from you!
+
+Using Salesforce-Zerobus in production? We want to hear from you! [Complete this brief survey](https://forms.gle/B6jWY5bDvGt7NeYi6) to share your use case and help us prioritize features that matter most to the community.
+
 
 ## Features
 
