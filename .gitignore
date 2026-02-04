@@ -9,6 +9,7 @@ __pycache__/
 !**/*.whl
 # Distribution / packaging
 .Python
+.databricks/*
 build/
 develop-eggs/
 downloads/

@@ -40,7 +40,6 @@ Using Salesforce-Zerobus in production? We want to hear from you! [Complete this
 
 **Install dependencies:**
 ```bash
-uv add databricks-zerobus-ingest-sdk
 uv sync
 ```
 
