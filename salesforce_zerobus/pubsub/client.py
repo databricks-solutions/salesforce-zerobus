@@ -818,6 +818,10 @@ class PubSub(object):
             if not acquired:
                 consecutive_timeouts += 1
 
+                # Recalculate time since last response AFTER the blocking acquire
+                # The value from line 809 is stale (calculated before the timeout wait)
+                time_since_last_response = time.time() - last_response_time
+
                 # Check if we're approaching Salesforce's 60-second limit
                 if time_since_last_response >= self.timeout_seconds:
                     self.logger.debug(

@@ -30,7 +30,7 @@ dependencies = [
     # Core dependencies
     "grpcio>=1.50.0",
     "grpcio-tools>=1.50.0",
-    "protobuf>=4.0.0,<7.0.0",
+    "protobuf>=6.0.0,<7.0.0",
     "avro-python3>=1.10.0",
     # Databricks dependencies
     "databricks-sdk>=0.12.0",

@@ -9,6 +9,7 @@ __pycache__/
 !**/*.whl
 # Distribution / packaging
 .Python
+.databricks/*
 build/
 develop-eggs/
 downloads/
@@ -158,6 +159,7 @@ env/
 venv/
 ENV/
 env.bak/
+.claude/
 venv.bak/
 
 # Spyder project settings
@@ -217,3 +219,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GO
+*.exe
+go_salesforce_zerobus/salesforce-zerobus
