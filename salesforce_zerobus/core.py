@@ -175,6 +175,7 @@ class SalesforceZerobus:
         self._databricks_forwarder = None
         self._replay_manager = None
         self._flow_controller = None
+        self._background_tasks = []
 
         # Setup logging
         self.logger = logging.getLogger(f"{__name__}.{sf_object}")
@@ -644,13 +645,24 @@ class SalesforceZerobus:
                 except Exception as e:
                     self.logger.warning(f"Error closing gRPC channel: {e}")
 
-            # Stop background loop and wait for async thread
-            if hasattr(self, "background_loop"):
+            # Stop background loop gracefully
+            if hasattr(self, "background_loop") and self.background_loop.is_running():
                 try:
+                    # Cancel background tasks first
+                    if hasattr(self, "_background_tasks"):
+                        for task in self._background_tasks:
+                            self.background_loop.call_soon_threadsafe(task.cancel)
+
+                    # Give tasks time to complete cancellation
+                    import time
+                    time.sleep(0.5)
+
+                    # Now stop the loop
                     self.background_loop.call_soon_threadsafe(self.background_loop.stop)
                 except RuntimeError:
                     # Loop may already be stopped
                     pass
+
             if hasattr(self, "async_thread"):
                 self.async_thread.join(timeout=5)
                 if self.async_thread.is_alive():
@@ -661,18 +673,25 @@ class SalesforceZerobus:
     async def _run_background_tasks(self):
         """Run background async tasks (event processing and health monitoring only)."""
         try:
-            tasks = [
+            self._background_tasks = [
                 asyncio.create_task(self._process_event_queue()),
                 asyncio.create_task(self._health_monitor()),
             ]
 
             done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
+                self._background_tasks, return_when=asyncio.FIRST_COMPLETED
             )
 
             for task in pending:
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
+        except asyncio.CancelledError:
+            # Graceful shutdown requested
+            self.logger.info("Background tasks cancelled during shutdown")
         except Exception as e:
             self.logger.error(f"Background tasks error: {e}")
         finally:

@@ -1,0 +1,29 @@
+syntax = "proto2";
+
+package salesforce_events;
+
+option go_package = "github.com/databricks-solutions/go-salesforce-zerobus/proto/gen";
+
+message SalesforceEvent {
+    optional string event_id = 1;
+    optional string schema_id = 2;
+    optional string replay_id = 3;
+    optional int64 timestamp = 4;
+
+    optional string change_type = 5;
+    optional string entity_name = 6;
+    optional string change_origin = 7;
+
+    repeated string record_ids = 8;
+    repeated string changed_fields = 9;
+    repeated string nulled_fields = 13;
+    repeated string diff_fields = 14;
+
+    optional string record_data_json = 10;
+
+    optional bytes payload_binary = 15;
+    optional string schema_json = 16;
+
+    optional string org_id = 11;
+    optional int64 processed_timestamp = 12;
+}
