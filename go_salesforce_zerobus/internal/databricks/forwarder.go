@@ -166,13 +166,13 @@ func (f *Forwarder) forwardEvent(event *pubsub.CDCEvent) error {
 		return fmt.Errorf("marshaling protobuf: %w", err)
 	}
 
-	if _, err := f.stream.IngestRecord(data); err != nil {
+	if _, err := f.stream.IngestRecordOffset(data); err != nil {
 		f.logger.Warn("Ingest failed, recreating stream", "error", err)
 		if recreateErr := f.recreateStream(); recreateErr != nil {
 			return fmt.Errorf("stream recreation failed: %w (original: %v)", recreateErr, err)
 		}
 		// Retry with new stream
-		if _, err := f.stream.IngestRecord(data); err != nil {
+		if _, err := f.stream.IngestRecordOffset(data); err != nil {
 			f.stream = nil
 			return fmt.Errorf("ingest failed after recreation: %w", err)
 		}
