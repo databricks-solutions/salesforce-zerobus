@@ -807,15 +807,9 @@ class SalesforceZerobus:
             for key, value in flow_stats.items():
                 stats[f"salesforce_{key}"] = value
 
-        # Add Zerobus stream health stats
+        # Add basic Zerobus stream status (detailed health requires async)
         if self._databricks_forwarder:
-            try:
-                zerobus_health = self._databricks_forwarder.get_stream_health()
-                # Prefix Zerobus stats for clarity
-                for key, value in zerobus_health.items():
-                    stats[f"zerobus_{key}"] = value
-            except Exception as e:
-                stats["zerobus_health_error"] = str(e)
+            stats["zerobus_stream_active"] = self._databricks_forwarder.stream is not None
 
         # Add Zerobus configuration
         stats["zerobus_config"] = self.zerobus_config.copy()
