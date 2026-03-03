@@ -10,13 +10,13 @@ proto:
 		proto/pubsub_api.proto proto/salesforce_events.proto
 
 build:
-	go build ./cmd/zerobus
+	go build -o salesforce-zerobus ./cmd/zerobus
 
 vet:
 	go vet ./...
 
 clean:
-	rm -f zerobus
+	rm -f salesforce-zerobus
 	rm -f proto/gen/*.go
 
 test:
