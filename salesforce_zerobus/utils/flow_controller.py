@@ -197,15 +197,7 @@ class FlowController:
         """Log a comprehensive health report."""
         status = self.get_health_status()
 
-        self.logger.info(
-            f"Flow Controller Health Report: "
-            f"Acquires: {status['total_acquires']}, "
-            f"Releases: {status['total_releases']}, "
-            f"Timeouts: {status['total_timeouts']}, "
-            f"Recoveries: {status['total_recoveries']}, "
-            f"Timeout Rate: {status['timeout_rate']:.2%}, "
-            f"Healthy: {status['is_healthy']}"
-        )
+        self.logger.info(f"Healthy: {status['is_healthy']}")
 
     def __enter__(self):
         """Context manager support for safe acquire/release."""
