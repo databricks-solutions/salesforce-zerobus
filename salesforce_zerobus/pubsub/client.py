@@ -331,6 +331,13 @@ class PubSub(object):
             grpc.StatusCode.DATA_LOSS,
         ]
 
+        # Special case: expired/invalid replay ID should fall back to LATEST
+        if status_code == grpc.StatusCode.INVALID_ARGUMENT and "Replay ID" in error_details:
+            self.logger.warning(
+                "Replay ID is invalid or expired - falling back to LATEST replay strategy"
+            )
+            return ("LATEST", None)
+
         if status_code in non_retryable_codes:
             return None
 

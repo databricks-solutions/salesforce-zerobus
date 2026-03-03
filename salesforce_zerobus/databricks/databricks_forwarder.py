@@ -10,14 +10,27 @@ import os
 import time
 
 from zerobus.sdk.shared import (
+    AckCallback,
     StreamConfigurationOptions,
-    StreamState,
     TableProperties,
     ZerobusException,
 )
 from zerobus.sdk.aio import ZerobusSdk
 
 from ..pubsub.proto import salesforce_events_pb2
+
+
+class _DefaultAckCallback(AckCallback):
+    """AckCallback subclass that logs ack offsets at debug level."""
+
+    def __init__(self, logger):
+        self._logger = logger
+
+    def on_ack(self, offset: int):
+        self._logger.debug(f"Zerobus ack received up to offset: {offset}")
+
+    def on_error(self, offset: int, error_message: str):
+        self._logger.warning(f"Zerobus ack error at offset {offset}: {error_message}")
 
 
 class DatabricksForwarder:
@@ -58,6 +71,10 @@ class DatabricksForwarder:
                 Note: recovery is always True for maximum reliability
                 Note: OAuth credentials are passed directly to create_stream(), not via token_factory
         """
+        # v0.3.0 requires https:// scheme on endpoints
+        if not ingest_endpoint.startswith("https://"):
+            ingest_endpoint = f"https://{ingest_endpoint}"
+
         self.ingest_endpoint = ingest_endpoint
         self.workspace_url = workspace_url
         self.client_id = client_id
@@ -90,38 +107,28 @@ class DatabricksForwarder:
         # Force recovery to always be True as per plan
         final_config["recovery"] = True
 
+        self.stream = None
+        self.logger = logging.getLogger(__name__)
+
         # Add optional acknowledgment callback for monitoring (if not provided)
         if "ack_callback" not in final_config:
-            final_config["ack_callback"] = self._default_ack_callback
+            final_config["ack_callback"] = _DefaultAckCallback(self.logger)
 
         # Note: OAuth credentials (client_id, client_secret) are passed directly to
         # create_stream() method, not via token_factory in the configuration
 
         self.stream_config = StreamConfigurationOptions(**final_config)
 
-        self.stream = None
-        self.logger = logging.getLogger(__name__)
-
-    def _default_ack_callback(self, response):
-        """Default acknowledgment callback for monitoring ingestion progress."""
-        offset_id = response.durability_ack_up_to_offset
-        self.logger.debug(f"Zerobus ack received up to offset: {offset_id}")
-
     def get_stream_health(self) -> dict:
-        """Get comprehensive stream health information."""
+        """Get stream health information."""
         if not self.stream:
             return {"status": "no_stream", "healthy": False, "stream_id": None}
 
-        try:
-            state = self.stream.get_state()
-            return {
-                "status": state.name.lower(),
-                "healthy": state in [StreamState.OPENED, StreamState.RECOVERING],
-                "stream_id": getattr(self.stream, "stream_id", None),
-                "state_code": state.value,
-            }
-        except Exception as e:
-            return {"status": "error", "healthy": False, "error": str(e)}
+        return {
+            "status": "active",
+            "healthy": True,
+            "stream_id": getattr(self.stream, "stream_id", None),
+        }
 
     async def initialize_stream(self):
         """Create the ingest stream to the Delta table."""
@@ -212,7 +219,7 @@ class DatabricksForwarder:
 
         try:
             # Ingest the record - SDK handles all recovery automatically
-            await self.stream.ingest_record(pb_event)
+            await self.stream.ingest_record_offset(pb_event)
 
             # Log successful ingestion
             record_id = record_ids[0] if record_ids else "unknown"
@@ -234,7 +241,7 @@ class DatabricksForwarder:
                 self.logger.info("Successfully recreated failed stream")
 
                 # Retry the ingestion with the new stream
-                await self.stream.ingest_record(pb_event)
+                await self.stream.ingest_record_offset(pb_event)
 
                 # Log successful retry
                 record_id = record_ids[0] if record_ids else "unknown"
