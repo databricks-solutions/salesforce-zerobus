@@ -3,7 +3,7 @@ module github.com/databricks-solutions/go-salesforce-zerobus
 go 1.24.2
 
 require (
-	github.com/databricks/zerobus-sdk-go v0.2.1
+	github.com/databricks/zerobus-sdk/go v1.0.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/joho/godotenv v1.5.1

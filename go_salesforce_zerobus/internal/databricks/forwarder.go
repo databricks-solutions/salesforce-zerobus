@@ -15,7 +15,7 @@ import (
 	"github.com/databricks-solutions/go-salesforce-zerobus/internal/pubsub"
 	pb "github.com/databricks-solutions/go-salesforce-zerobus/proto/gen"
 
-	zerobus "github.com/databricks/zerobus-sdk-go"
+	zerobus "github.com/databricks/zerobus-sdk/go"
 )
 
 // StreamHealth reports the current state of the Zerobus stream.
@@ -91,7 +91,10 @@ func (f *Forwarder) buildStreamOpts() *zerobus.StreamConfigurationOptions {
 	opts.Recovery = true
 	opts.RecoveryRetries = uint32(f.cfg.ZerobusRecoveryRetries)
 	opts.RecoveryTimeoutMs = uint64(f.cfg.ZerobusRecoveryTimeoutMs)
+	opts.RecoveryBackoffMs = uint64(f.cfg.ZerobusRecoveryBackoffMs)
 	opts.MaxInflightRequests = uint64(f.cfg.ZerobusMaxInflight)
+	opts.ServerLackOfAckTimeoutMs = uint64(f.cfg.ZerobusServerAckTimeoutMs)
+	opts.FlushTimeoutMs = uint64(f.cfg.ZerobusFlushTimeoutMs)
 	return opts
 }
 
