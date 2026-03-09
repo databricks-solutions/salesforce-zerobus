@@ -1,5 +1,5 @@
-github.com/databricks/zerobus-sdk-go v0.2.1 h1:2/6pj7eCK0zr9sjhHHTzoeO2cBroQI60cASeuHfOALM=
-github.com/databricks/zerobus-sdk-go v0.2.1/go.mod h1:DcqDF0CV91N7ok0JlmYymiHO6PP69dhxVI6xiveNI2s=
+github.com/databricks/zerobus-sdk/go v1.0.0 h1:kidzvvGwIJY72gb4Ux69iVqYAMt+pR60rL7gkF0cTKA=
+github.com/databricks/zerobus-sdk/go v1.0.0/go.mod h1:crqfA95NM8LMuWyUYdYG3EMrsKSZ/K6sLqfl1EUAq3E=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
