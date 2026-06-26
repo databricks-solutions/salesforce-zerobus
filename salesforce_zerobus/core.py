@@ -177,6 +177,12 @@ class SalesforceZerobus:
         self._flow_controller = None
         self._background_tasks = []
 
+        # Synchronization for the background Databricks init (table creation + replay
+        # resolution). The subscription must wait for this and reuse its replay
+        # decision; re-deriving it separately races table creation (see start()).
+        self._init_complete = threading.Event()
+        self._init_replay_params = None
+
         # Setup logging
         self.logger = logging.getLogger(f"{__name__}.{sf_object}")
 
@@ -309,45 +315,62 @@ class SalesforceZerobus:
 
     async def _initialize_databricks_async(self):
         """Initialize Databricks components for async operation."""
-        # First, ensure table exists and get subscription params (triggers table creation if needed)
-        if self._replay_manager:
-            # This call will create the table if it doesn't exist
-            replay_type, replay_id = self._replay_manager.get_subscription_params(
-                auto_create_table=self.auto_create_table,
-                backfill_historical=self.backfill_historical,
-            )
-            self.logger.debug(
-                f"Table initialization complete, replay mode: {replay_type}"
-            )
-
-            # Initialize replay recovery (pre-fetch replay_id to avoid blocking later)
-            self._replay_manager.initialize_replay_recovery()
-
-        # Now initialize the stream (table should exist at this point)
-        if self._databricks_forwarder:
-            await self._databricks_forwarder.initialize_stream()
-            self.logger.info("Databricks stream initialized")
-
-    def _get_subscription_params(self):
-        """Get replay parameters for subscription (table should already exist from async init)."""
-        if self._replay_manager:
-            try:
-                # Table should already exist from _initialize_databricks_async, so just get the params
+        try:
+            # First, ensure table exists and get subscription params (triggers table creation if needed)
+            if self._replay_manager:
+                # This call will create the table if it doesn't exist
                 replay_type, replay_id = self._replay_manager.get_subscription_params(
-                    auto_create_table=False,  # Don't create table again
+                    auto_create_table=self.auto_create_table,
                     backfill_historical=self.backfill_historical,
                 )
-                if replay_type == "CUSTOM":
-                    self.logger.info(f"Resuming from replay_id: {replay_id}")
-                elif replay_type == "EARLIEST":
-                    self.logger.info("Starting historical backfill from EARLIEST")
-                else:
-                    self.logger.info("Starting fresh subscription from LATEST")
-                return replay_type, replay_id
+                # Cache the resolved decision so the subscription reuses it rather than
+                # re-deriving with auto_create_table=False (which races table creation
+                # and can wrongly fall back to LATEST, skipping the backfill).
+                self._init_replay_params = (replay_type, replay_id)
+                self.logger.debug(
+                    f"Table initialization complete, replay mode: {replay_type}"
+                )
+
+                # Initialize replay recovery (pre-fetch replay_id to avoid blocking later)
+                self._replay_manager.initialize_replay_recovery()
+
+            # Now initialize the stream (table should exist at this point)
+            if self._databricks_forwarder:
+                await self._databricks_forwarder.initialize_stream()
+                self.logger.info("Databricks stream initialized")
+        finally:
+            # Always signal completion so a waiting start() never blocks forever,
+            # even if initialization raised partway through.
+            self._init_complete.set()
+
+    def _get_subscription_params(self):
+        """Get replay parameters for the subscription.
+
+        Prefers the decision already computed by _initialize_databricks_async, which
+        owns table creation and may select EARLIEST/CUSTOM. Only re-derives here (with
+        auto_create_table=False) if that init step produced no result, since re-deriving
+        races table creation and can wrongly fall back to LATEST."""
+        if self._init_replay_params is not None:
+            replay_type, replay_id = self._init_replay_params
+        elif self._replay_manager:
+            try:
+                replay_type, replay_id = self._replay_manager.get_subscription_params(
+                    auto_create_table=False,  # init path owns table creation
+                    backfill_historical=self.backfill_historical,
+                )
             except Exception as e:
                 self.logger.warning(f"Replay manager failed, using LATEST: {e}")
+                replay_type, replay_id = "LATEST", ""
+        else:
+            replay_type, replay_id = "LATEST", ""
 
-        return "LATEST", ""
+        if replay_type == "CUSTOM":
+            self.logger.info(f"Resuming from replay_id: {replay_id}")
+        elif replay_type == "EARLIEST":
+            self.logger.info("Starting historical backfill from EARLIEST")
+        else:
+            self.logger.info("Starting fresh subscription from LATEST")
+        return replay_type, replay_id
 
     def _salesforce_event_callback(self, event, pubsub):
         """Callback for processing Salesforce events."""
@@ -594,9 +617,15 @@ class SalesforceZerobus:
             self.async_thread = threading.Thread(target=run_async, daemon=True)
             self.async_thread.start()
 
-            import time
-
-            time.sleep(2)
+            # Wait for the background init (table creation + replay-mode resolution) to
+            # finish before resolving subscription params. A fixed sleep here used to
+            # race table creation: on a slow/cold warehouse the table didn't exist yet,
+            # so the subscription fell back to LATEST and silently skipped the backfill.
+            if not self._init_complete.wait(timeout=120):
+                self.logger.warning(
+                    "Databricks initialization did not complete within 120s; "
+                    "proceeding (subscription may fall back to LATEST)"
+                )
             self.logger.info("Databricks connection initialized")
 
             replay_type, replay_id = self._get_subscription_params()
