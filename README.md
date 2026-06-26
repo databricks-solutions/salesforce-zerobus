@@ -665,6 +665,70 @@ for salesforce_object in salesforce_objects:
 - **Performance**: More efficient than JSON parsing for large datasets
 - **Field-Level Access**: Direct access to individual Salesforce fields as columns
 
+### Accurate Current State and SCD2 History
+
+The deployed `lakeflow_declarative_pipeline.py` extends the parsing snippet above
+to also maintain, **per Salesforce object**:
+
+| Table | Type | Description |
+|-------|------|-------------|
+| `salesforce_current_<obj>` | Type-1 current state | One row per record with accurate latest values |
+| `salesforce_history_<obj>` | SCD2 history | Full history with `__START_AT` / `__END_AT` |
+
+**Why this needs more than a `@dp.table` or `create_auto_cdc_flow`.** Salesforce
+CDC update events are *sparse* — only changed fields are meaningful — and because
+the payload is Avro, every field is always present, so an **unchanged** field and
+a field **changed to null** both decode as `null`. The only authoritative signal
+is the change mask: `changed_fields` / `nulled_fields` / `diff_fields`.
+`create_auto_cdc_flow`'s `ignore_null_updates` keys off the value being `null`, so
+it cannot tell unchanged-null from changed-to-null. The pipeline therefore applies
+a per-column **conditional MERGE** inside a `@dp.foreach_batch_sink`:
+
+- field **unchanged** → existing target value carried forward
+- field **changed to null** → written as `NULL`
+- field **changed to value** → written with the new value
+
+`salesforce_current_<obj>` has Change Data Feed enabled; Layer 2 reads that CDF
+(now full, correct row images) into `salesforce_history_<obj>` via
+`create_auto_cdc_flow` with `stored_as_scd_type=2`.
+
+```sql
+-- accurate latest state
+SELECT Id, Email, Phone, _last_change_type, _updated_at
+FROM salesforce_current_Contact ORDER BY _updated_at DESC LIMIT 20;
+
+-- point-in-time history
+SELECT Id, Email, __START_AT, __END_AT
+FROM salesforce_history_Contact WHERE Id = '<record id>' ORDER BY __START_AT;
+```
+
+**Notes**
+- `salesforce_current_<obj>` is an **external** Delta table (not a pipeline-managed
+  node), so it is **not** reset by a full refresh. The pipeline creates it itself
+  during graph evaluation via the **DeltaTable builder API** (`DeltaTable.createIfNotExists`)
+  — `spark.sql("CREATE TABLE …")` is rejected during SDP graph evaluation, but the
+  builder API is allowed. Creating it at eval (rather than in the sink at runtime)
+  is required because the SCD2 CDF reader references the table by name and must
+  resolve it at flow-analysis time, before any flow runs.
+- **History trails current by at most one update** in triggered/dev runs: within a
+  single update the CDF reader can finish before the sink commits its MERGE, so the
+  new change is picked up on the next update. In continuous production this is a
+  one-microbatch lag that self-heals; for a dev/triggered run, trigger once more to
+  let history catch up.
+- **Schema evolution**: restart the pipeline (not a full refresh) to pick up the
+  latest Avro schema; new fields are captured after the current table is recreated.
+- **`diff_fields` (large text ≥ 1000 chars, e.g. `Description`)** are sent by
+  Salesforce CDC as a **unified diff**, not the full value. The sink **reconstructs**
+  the full value by folding each record's per-batch change chain in sequence order
+  (full-value and diff events) and applying the unified diff to the prior value via
+  the `resolve_chain` UDF. The value is split/rejoined on its own line terminator
+  (CRLF-aware) and verified against the SHA-256 in the diff's `+++` header; on
+  mismatch (or when no prior full value exists to apply the diff to) it falls back to
+  the last full value rather than storing diff text. A one-time full extract would
+  seed bases for records whose long text was set before CDC capture.
+- **`current_cdf_<obj>`** is a `@dp.temporary_view` (pipeline-scoped, not
+  materialized), used only as the streaming CDF source for the SCD2 flow.
+
 
 ### Regenerating Protocol Buffer Files
 
