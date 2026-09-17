@@ -50,8 +50,12 @@ from pyspark.sql.types import LongType, StringType, StructField, StructType, Tim
 spark = SparkSession.getActiveSession()
 
 # Bronze table written by the salesforce-zerobus streamer.
-zerobus_table = "users.dom_rodrigues.salesforce_change_events_raw"
-CATALOG, SCHEMA, _ = zerobus_table.split(".")
+# Resolved from pipeline Spark conf (set in resources/pipelines.yml via DABs variables).
+CATALOG = spark.conf.get("catalog", "main")
+SCHEMA = spark.conf.get("schema", "default")
+zerobus_table = spark.conf.get(
+    "zerobus_table", f"{CATALOG}.{SCHEMA}.salesforce_change_events_raw"
+)
 
 # Bronze columns that are CDC metadata, not Salesforce business fields. Everything
 # else after Avro parsing (minus the ChangeEventHeader struct) is a business field.
