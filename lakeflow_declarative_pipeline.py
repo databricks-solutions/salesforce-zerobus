@@ -216,8 +216,15 @@ def _resolve_chain(prior, chain):
 
 
 def _path_key(path: str) -> str:
-    """Nested field path -> safe suffix for aggregate helper columns."""
-    return re.sub(r"\W+", "_", path)
+    """Nested field path -> collision-free, safe suffix for helper columns.
+
+    Appends an 8-char SHA-1 digest of the original path so that a flat field
+    named `BillingAddress_Street` never collides with the nested path
+    `BillingAddress.Street` (both sanitise to the same underscore prefix).
+    """
+    safe = re.sub(r"\W+", "_", path)
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+    return f"{safe}_{digest}"
 
 
 def _path_col(path: str):
