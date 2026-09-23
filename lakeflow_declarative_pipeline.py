@@ -50,8 +50,12 @@ from pyspark.sql.types import LongType, StringType, StructField, StructType, Tim
 spark = SparkSession.getActiveSession()
 
 # Bronze table written by the salesforce-zerobus streamer.
-zerobus_table = "alexn.salesforce.zb_contact"
-CATALOG, SCHEMA, _ = zerobus_table.split(".")
+# Resolved from pipeline Spark conf (set in resources/pipelines.yml via DABs variables).
+CATALOG = spark.conf.get("catalog", "main")
+SCHEMA = spark.conf.get("schema", "default")
+zerobus_table = spark.conf.get(
+    "zerobus_table", f"{CATALOG}.{SCHEMA}.salesforce_change_events_raw"
+)
 
 # Bronze columns that are CDC metadata, not Salesforce business fields. Everything
 # else after Avro parsing (minus the ChangeEventHeader struct) is a business field.
@@ -211,16 +215,62 @@ def _resolve_chain(prior, chain):
     return cur
 
 
-def _collapse_batch(batch_df, business_cols, string_cols):
+def _path_key(path: str) -> str:
+    """Nested field path -> collision-free, safe suffix for helper columns.
+
+    Appends an 8-char SHA-1 digest of the original path so that a flat field
+    named `BillingAddress_Street` never collides with the nested path
+    `BillingAddress.Street` (both sanitise to the same underscore prefix).
+    """
+    safe = re.sub(r"\W+", "_", path)
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+    return f"{safe}_{digest}"
+
+
+def _path_col(path: str):
+    """Resolve a possibly nested field path as a Spark Column."""
+    return col(".".join(f"`{part}`" for part in path.split(".")))
+
+
+def _path_sql(path: str, alias: str) -> str:
+    """Resolve a possibly nested field path in SQL-expression form."""
+    return alias + "." + ".".join(f"`{part}`" for part in path.split("."))
+
+
+def _leaf_specs(fields, prefix=""):
+    """Enumerate all leaf field paths under the supplied StructFields."""
+    specs = []
+    for field in fields:
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        if isinstance(field.dataType, StructType):
+            specs.extend(_leaf_specs(field.dataType.fields, path))
+        else:
+            specs.append((path, field.dataType))
+    return specs
+
+
+def _schema_leaf_paths(schema, prefix=""):
+    """Return the set of all leaf field paths present in a DataFrame schema."""
+    paths = set()
+    for field in schema.fields:
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        if isinstance(field.dataType, StructType):
+            paths.update(_schema_leaf_paths(field.dataType, path))
+        else:
+            paths.add(path)
+    return paths
+
+
+def _collapse_batch(batch_df, business_fields, available_paths=None):
     """Fold all events for a key within one micro-batch into a single combined delta.
 
     Each event is itself a sparse delta, so we cannot just keep the latest event:
-    fields changed by earlier events in the same batch would be lost. Per column,
-    take the value from the latest event in which the column was actually touched.
+    fields changed by earlier events in the same batch would be lost. Aggregate at the
+    *leaf field* level (including nested struct fields) so sparse struct payloads like
+    `BillingAddress.Street` do not overwrite untouched siblings with nulls.
 
-    String columns instead emit an ordered `__chain__c` of touching events (value +
-    is-diff flag) so the sink can fold full-value and unified-diff events in sequence
-    (a diff must apply to the prior value, which may be set earlier in the same batch).
+    String leaves emit an ordered `__chain__<path>` of touching events (value + is-diff
+    flag) so the sink can fold full-value and unified-diff events in sequence.
     """
     mask = array_union(
         array_union(col("changed_fields"), col("nulled_fields")), col("diff_fields")
@@ -234,28 +284,33 @@ def _collapse_batch(batch_df, business_cols, string_cols):
         .withColumn("_mask", mask)
     )
 
+    if available_paths is None:
+        available_paths = _schema_leaf_paths(batch_df.schema)
+
     aggs = []
-    for c in business_cols:
-        # A row "touches" c when c is named in the change mask, or it's a create-like
-        # event with a populated value (creates carry a full image, empty mask).
-        touched = array_contains(col("_mask"), lit(c)) | (is_create_like & col(f"`{c}`").isNotNull())
-        seq_c = F.when(touched, col("_seq"))  # null on rows that don't touch c
-        # Did c get touched at all in this batch?
-        aggs.append(F.max(seq_c).isNotNull().alias(f"__chg__{c}"))
-        if c in string_cols:
-            # ordered chain of touching events (value + whether it's a unified diff)
+    for path, data_type in _leaf_specs(business_fields):
+        if path not in available_paths:
+            continue
+        key = _path_key(path)
+        value_col = _path_col(path)
+        # Salesforce names nested changes by leaf path (for example
+        # `BillingAddress.Street`), so change detection must happen at that level.
+        touched = array_contains(col("_mask"), lit(path)) | (is_create_like & value_col.isNotNull())
+        seq_c = F.when(touched, col("_seq"))  # null on rows that don't touch this leaf
+        aggs.append(F.max(seq_c).isNotNull().alias(f"__chg__{key}"))
+        if isinstance(data_type, StringType):
             item = F.when(
                 touched,
                 F.struct(
                     col("_seq").alias("s"),
-                    col(f"`{c}`").alias("v"),
-                    array_contains(col("diff_fields"), lit(c)).alias("d"),
+                    value_col.alias("v"),
+                    array_contains(col("diff_fields"), lit(path)).alias("d"),
                 ),
             )
-            aggs.append(F.collect_list(item).alias(f"__chain__{c}"))
+            aggs.append(F.collect_list(item).alias(f"__chain__{key}"))
         else:
             # Latest value among touched rows (null here = a genuine change-to-null).
-            aggs.append(max_by(col(f"`{c}`"), seq_c).alias(c))
+            aggs.append(max_by(value_col, seq_c).alias(f"__val__{key}"))
 
     aggs += [
         max_by(col("change_type"), col("_seq")).alias("_last_change_type"),
@@ -263,6 +318,52 @@ def _collapse_batch(batch_df, business_cols, string_cols):
         F.max(col("timestamp")).alias("_last_event_ts"),
     ]
     return d.groupBy("Id").agg(*aggs)
+
+
+def _build_struct_touched_sql(path: str, data_type: StructType, available_paths: set) -> str:
+    """SQL predicate: did any descendant leaf under this struct change?"""
+    clauses = []
+    for field in data_type.fields:
+        child_path = f"{path}.{field.name}"
+        if isinstance(field.dataType, StructType):
+            child_clause = _build_struct_touched_sql(child_path, field.dataType, available_paths)
+            if child_clause != "false":
+                clauses.append(child_clause)
+        elif child_path in available_paths:
+            clauses.append(f"s.`__chg__{_path_key(child_path)}`")
+    return " OR ".join(f"({clause})" for clause in clauses) if clauses else "false"
+
+
+def _build_merge_sql(path: str, data_type, mode: str, available_paths: set) -> str:
+    """Build the MERGE expression for one field path.
+
+    `mode` is `update` (fallback to the current target value) or `insert` (fallback to
+    NULL because there is no prior row yet).  `available_paths` is the set of leaf
+    paths present in the current batch; paths outside it fall back to the target
+    value (update) or NULL (insert) so schema evolution never breaks the MERGE.
+    """
+    fallback = _path_sql(path, "t") if mode == "update" else "NULL"
+    if isinstance(data_type, StructType):
+        child_sql = ", ".join(
+            f"'{field.name}', {_build_merge_sql(f'{path}.{field.name}', field.dataType, mode, available_paths)}"
+            for field in data_type.fields
+        )
+        return (
+            f"CASE WHEN {_build_struct_touched_sql(path, data_type, available_paths)} "
+            f"THEN named_struct({child_sql}) ELSE {fallback} END"
+        )
+
+    if path not in available_paths:
+        return fallback
+
+    key = _path_key(path)
+    if isinstance(data_type, StringType):
+        base = _path_sql(path, "t") if mode == "update" else "CAST(NULL AS STRING)"
+        return (
+            f"CASE WHEN s.`__chg__{key}` "
+            f"THEN resolve_chain({base}, s.`__chain__{key}`) ELSE {fallback} END"
+        )
+    return f"CASE WHEN s.`__chg__{key}` THEN s.`__val__{key}` ELSE {fallback} END"
 
 
 def _ensure_current_table(current_fqn: str, obj: str, schema_json: str):
@@ -305,17 +406,17 @@ def _merge_fn(current_fqn: str):
             return
         spark_s = batch_df.sparkSession
         spark_s.udf.register("resolve_chain", _resolve_chain, StringType())
-        # Only merge columns that exist in the target (guards against schema drift).
-        target_cols = set(spark_s.read.table(current_fqn).columns)
-        string_cols = {
-            f.name for f in batch_df.schema.fields if isinstance(f.dataType, StringType)
-        }
-        business_cols = [
-            c for c in batch_df.columns if c not in META_COLS and c in target_cols
+        target_schema = spark_s.read.table(current_fqn).schema
+        # Only process fields present in the current batch's schema.  The target
+        # table may carry columns from a previous Avro schema version that aren't
+        # in the current batch (schema evolution); referencing them would crash.
+        available_paths = _schema_leaf_paths(batch_df.schema)
+        business_fields = [
+            f
+            for f in target_schema.fields
+            if f.name not in {"Id", "_last_change_type", "_last_replay_id", "_last_event_ts", "_updated_at"}
         ]
-        combined = _collapse_batch(
-            batch_df, business_cols, {c for c in business_cols if c in string_cols}
-        )
+        combined = _collapse_batch(batch_df, business_fields, available_paths)
 
         tracking = {
             "_last_change_type": "s._last_change_type",
@@ -324,16 +425,9 @@ def _merge_fn(current_fqn: str):
             "_updated_at": "current_timestamp()",
         }
         update_set, insert_values = {}, {"Id": "s.Id"}
-        for c in business_cols:
-            if c in string_cols:
-                # fold the change chain over the prior value (handles unified diffs);
-                # empty chain -> carry forward on update, NULL on insert
-                update_set[c] = f"resolve_chain(t.`{c}`, s.`__chain__{c}`)"
-                insert_values[c] = f"resolve_chain(CAST(NULL AS STRING), s.`__chain__{c}`)"
-            else:
-                # only overwrite when actually touched this batch
-                update_set[c] = f"CASE WHEN s.`__chg__{c}` THEN s.`{c}` ELSE t.`{c}` END"
-                insert_values[c] = f"CASE WHEN s.`__chg__{c}` THEN s.`{c}` ELSE NULL END"
+        for field in business_fields:
+            update_set[field.name] = _build_merge_sql(field.name, field.dataType, "update", available_paths)
+            insert_values[field.name] = _build_merge_sql(field.name, field.dataType, "insert", available_paths)
         update_set.update(tracking)
         insert_values.update(tracking)
 

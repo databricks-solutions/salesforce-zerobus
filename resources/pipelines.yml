@@ -18,3 +18,4 @@ resources:
         bundle.sourcePath: ${workspace.file_path}/src
         catalog: ${var.ldp_catalog}
         schema: ${var.ldp_schema}
+        zerobus_table: ${var.ldp_catalog}.${var.ldp_schema}.salesforce_change_events_raw
