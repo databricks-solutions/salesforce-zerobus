@@ -223,4 +223,7 @@ __marimo__/
 
 # GO
 *.exe
-go_salesforce_zerobus/salesforce-zerobus
+go_salesforce_zerobus_cgo/salesforce-zerobus
+go_salesforce_zerobus/bin/
+go_salesforce_zerobus/coverage.out
+go_salesforce_zerobus/.databricks/

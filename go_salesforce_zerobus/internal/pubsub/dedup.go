@@ -4,26 +4,29 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 )
 
-// DedupCache provides LRU-based event deduplication.
+// DedupCache is a small LRU of recently delivered event IDs, used to drop
+// events Salesforce redelivers after a reconnect.
 type DedupCache struct {
 	cache *lru.Cache[string, struct{}]
 }
 
-// NewDedupCache creates a dedup cache with the given maximum size.
-func NewDedupCache(size int) (*DedupCache, error) {
-	c, err := lru.New[string, struct{}](size)
-	if err != nil {
-		return nil, err
+// NewDedupCache creates a dedup cache holding up to size event IDs.
+func NewDedupCache(size int) *DedupCache {
+	if size <= 0 {
+		size = 1
 	}
-	return &DedupCache{cache: c}, nil
+	c, _ := lru.New[string, struct{}](size) // only errors on size <= 0
+	return &DedupCache{cache: c}
 }
 
-// IsDuplicate returns true if the event ID has been seen before.
-func (d *DedupCache) IsDuplicate(eventID string) bool {
-	return d.cache.Contains(eventID)
+// Seen reports whether eventID was marked delivered.
+func (d *DedupCache) Seen(eventID string) bool {
+	return eventID != "" && d.cache.Contains(eventID)
 }
 
-// MarkProcessed records an event ID as processed.
-func (d *DedupCache) MarkProcessed(eventID string) {
-	d.cache.Add(eventID, struct{}{})
+// Mark records eventID as delivered. Call only after the sink accepted it.
+func (d *DedupCache) Mark(eventID string) {
+	if eventID != "" {
+		d.cache.Add(eventID, struct{}{})
+	}
 }

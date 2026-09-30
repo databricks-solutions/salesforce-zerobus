@@ -1,78 +1,135 @@
 package pubsub
 
 import (
+	"container/list"
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 
 	"github.com/linkedin/goavro/v2"
-	"google.golang.org/grpc/metadata"
+	"golang.org/x/sync/singleflight"
 
-	pb "github.com/databricks-solutions/go-salesforce-zerobus/proto/gen"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/obs"
 )
 
-// SchemaCache provides thread-safe caching of compiled Avro codecs.
+// Schema is a compiled Salesforce Avro schema.
+type Schema struct {
+	ID     string
+	JSON   string
+	Codec  *goavro.Codec // standard-JSON codec: decodes binary, emits unwrapped JSON
+	Bitmap *BitmapSchema
+	size   int64
+}
+
+// CompileSchema compiles an Avro schema for decoding and bitmap resolution.
+func CompileSchema(id, schemaJSON string) (*Schema, error) {
+	codec, err := goavro.NewCodecForStandardJSONFull(schemaJSON)
+	if err != nil {
+		return nil, fmt.Errorf("compiling Avro schema %s: %w", id, err)
+	}
+	bm, err := ParseBitmapSchema(schemaJSON)
+	if err != nil {
+		return nil, err
+	}
+	// Rough retained size: raw JSON dominates; the compiled codec is a small
+	// multiple of it.
+	return &Schema{ID: id, JSON: schemaJSON, Codec: codec, Bitmap: bm, size: int64(len(schemaJSON)) * 4}, nil
+}
+
+// SchemaFetcher fetches the JSON for schemaID (the GetSchema RPC).
+type SchemaFetcher func(ctx context.Context, schemaID string) (string, error)
+
+// SchemaCache is a byte-bounded LRU of compiled schemas shared by every
+// subscription on the replica. Entries are keyed by (org, schema ID): CDC
+// schemas include org-specific custom fields, so IDs are not assumed to be
+// globally unique. Concurrent misses for the same key share one fetch.
 type SchemaCache struct {
-	mu     sync.RWMutex
-	cache  map[string]*goavro.Codec
-	raw    map[string]string // schema_id -> raw JSON string
-	logger *slog.Logger
+	maxBytes int64
+
+	mu    sync.Mutex
+	bytes int64
+	ll    *list.List
+	items map[string]*list.Element
+
+	group singleflight.Group
 }
 
-// NewSchemaCache creates a new SchemaCache.
-func NewSchemaCache(logger *slog.Logger) *SchemaCache {
-	return &SchemaCache{
-		cache:  make(map[string]*goavro.Codec),
-		raw:    make(map[string]string),
-		logger: logger,
-	}
+type schemaEntry struct {
+	key    string
+	schema *Schema
 }
 
-// GetOrFetch retrieves a cached Avro codec. On cache miss, fetches the schema
-// from Salesforce via the GetSchema RPC and compiles it.
-func (sc *SchemaCache) GetOrFetch(ctx context.Context, schemaID string, stub pb.PubSubClient, md metadata.MD) (*goavro.Codec, string, error) {
-	sc.mu.RLock()
-	if codec, ok := sc.cache[schemaID]; ok {
-		rawJSON := sc.raw[schemaID]
-		sc.mu.RUnlock()
-		return codec, rawJSON, nil
+// NewSchemaCache creates a cache holding roughly maxBytes of schemas.
+func NewSchemaCache(maxBytes int64) *SchemaCache {
+	if maxBytes <= 0 {
+		maxBytes = 256 << 20
 	}
-	sc.mu.RUnlock()
+	return &SchemaCache{maxBytes: maxBytes, ll: list.New(), items: make(map[string]*list.Element)}
+}
 
-	// Fetch schema from Salesforce
-	outCtx := metadata.NewOutgoingContext(ctx, md)
-	resp, err := stub.GetSchema(outCtx, &pb.SchemaRequest{SchemaId: schemaID})
+// Get returns the schema for (orgID, schemaID), fetching and compiling it on
+// a miss.
+func (c *SchemaCache) Get(ctx context.Context, orgID, schemaID string, fetch SchemaFetcher) (*Schema, error) {
+	key := orgID + "/" + schemaID
+	if s := c.lookup(key); s != nil {
+		obs.SchemaCacheHits.Inc()
+		return s, nil
+	}
+	v, err, _ := c.group.Do(key, func() (any, error) {
+		if s := c.lookup(key); s != nil {
+			return s, nil
+		}
+		obs.SchemaCacheMisses.Inc()
+		schemaJSON, err := fetch(ctx, schemaID)
+		if err != nil {
+			return nil, err
+		}
+		s, err := CompileSchema(schemaID, schemaJSON)
+		if err != nil {
+			return nil, err
+		}
+		c.add(key, s)
+		return s, nil
+	})
 	if err != nil {
-		return nil, "", fmt.Errorf("GetSchema RPC failed for %s: %w", schemaID, err)
+		return nil, err
 	}
-
-	schemaJSON := resp.GetSchemaJson()
-	codec, err := goavro.NewCodec(schemaJSON)
-	if err != nil {
-		return nil, "", fmt.Errorf("compiling Avro schema %s: %w", schemaID, err)
-	}
-
-	sc.mu.Lock()
-	sc.cache[schemaID] = codec
-	sc.raw[schemaID] = schemaJSON
-	sc.mu.Unlock()
-
-	sc.logger.Debug("Cached new Avro schema", "schema_id", schemaID)
-	return codec, schemaJSON, nil
+	return v.(*Schema), nil
 }
 
-// DecodeAvro decodes an Avro binary payload using the given codec.
-func DecodeAvro(codec *goavro.Codec, payload []byte) (map[string]interface{}, error) {
-	native, _, err := codec.NativeFromBinary(payload)
-	if err != nil {
-		return nil, fmt.Errorf("Avro decode failed: %w", err)
+func (c *SchemaCache) lookup(key string) *Schema {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[key]; ok {
+		c.ll.MoveToFront(el)
+		return el.Value.(*schemaEntry).schema
 	}
-
-	record, ok := native.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("Avro decoded value is not a map: %T", native)
-	}
-	return record, nil
+	return nil
 }
 
+func (c *SchemaCache) add(key string, s *Schema) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[key]; ok {
+		c.ll.MoveToFront(el)
+		return
+	}
+	c.items[key] = c.ll.PushFront(&schemaEntry{key: key, schema: s})
+	c.bytes += s.size
+	// Always keep the newest entry, even if it alone exceeds the budget.
+	for c.bytes > c.maxBytes && c.ll.Len() > 1 {
+		el := c.ll.Back()
+		e := el.Value.(*schemaEntry)
+		c.ll.Remove(el)
+		delete(c.items, e.key)
+		c.bytes -= e.schema.size
+	}
+	obs.SchemaCacheBytes.Set(float64(c.bytes))
+}
+
+// Len returns the number of cached schemas.
+func (c *SchemaCache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ll.Len()
+}

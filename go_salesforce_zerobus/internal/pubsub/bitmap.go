@@ -7,131 +7,119 @@ import (
 	"strings"
 )
 
-// ProcessBitmap converts Salesforce CDC bitmap hex strings to field name lists
-// using the Avro schema to map bit positions to field names.
-func ProcessBitmap(schemaJSON string, bitmapFields []interface{}) ([]string, error) {
-	if len(bitmapFields) == 0 {
-		return nil, nil
-	}
-
-	schema, err := parseAvroSchema(schemaJSON)
-	if err != nil {
-		return nil, fmt.Errorf("parsing Avro schema for bitmap: %w", err)
-	}
-
-	var fields []string
-
-	for _, bf := range bitmapFields {
-		bitmapStr, ok := bf.(string)
-		if !ok {
-			continue
-		}
-
-		if strings.HasPrefix(bitmapStr, "0x") || strings.HasPrefix(bitmapStr, "0X") {
-			// Top-level bitmap
-			names := fieldNamesFromHex(bitmapStr, schema.Fields)
-			fields = append(fields, names...)
-		} else if strings.Contains(bitmapStr, "-") {
-			// Nested bitmap: "parentPos-childBitmap"
-			parts := strings.SplitN(bitmapStr, "-", 2)
-			parentPos, err := strconv.Atoi(parts[0])
-			if err != nil {
-				continue
-			}
-			childBitmap := parts[1]
-
-			if parentPos < len(schema.Fields) {
-				parentField := schema.Fields[parentPos]
-				childFields := getNestedFields(parentField.Type)
-				childNames := fieldNamesFromHex(childBitmap, childFields)
-				for i, name := range childNames {
-					childNames[i] = parentField.Name + "." + name
-				}
-				fields = append(fields, childNames...)
-			}
-		}
-	}
-
-	return fields, nil
+// BitmapSchema maps Salesforce CDC bitmap positions to Avro field names. It is
+// parsed once per schema and cached alongside the codec, so decoding a bitmap
+// does not re-parse the schema JSON on every event.
+//
+// See "Event Deserialization Considerations" in the Pub/Sub API guide.
+type BitmapSchema struct {
+	fields []bitmapField
 }
 
-func fieldNamesFromHex(hex string, fields []avroField) []string {
-	hex = strings.TrimPrefix(hex, "0x")
-	hex = strings.TrimPrefix(hex, "0X")
+type bitmapField struct {
+	name     string
+	children []string // field names of a nested record type, if any
+}
 
-	bitset := hexToBitset(hex)
+// ParseBitmapSchema parses the top-level fields of an Avro record schema.
+func ParseBitmapSchema(schemaJSON string) (*BitmapSchema, error) {
+	var schema struct {
+		Fields []struct {
+			Name string `json:"name"`
+			Type any    `json:"type"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(schemaJSON), &schema); err != nil {
+		return nil, fmt.Errorf("parsing Avro schema for bitmap: %w", err)
+	}
+	bs := &BitmapSchema{fields: make([]bitmapField, len(schema.Fields))}
+	for i, f := range schema.Fields {
+		bs.fields[i] = bitmapField{name: f.Name, children: nestedFieldNames(f.Type)}
+	}
+	return bs, nil
+}
+
+// FieldNames converts bitmap strings (e.g. changedFields) to field names.
+// A top-level bitmap looks like "0x0A"; a nested bitmap looks like
+// "3-0x04", meaning bit 2 of the record field at position 3.
+func (s *BitmapSchema) FieldNames(bitmaps []string) []string {
+	if s == nil || len(bitmaps) == 0 {
+		return nil
+	}
 	var names []string
-	for i, set := range bitset {
-		if set && i < len(fields) {
-			names = append(names, fields[i].Name)
+	for _, bm := range bitmaps {
+		switch {
+		case hasHexPrefix(bm):
+			for _, pos := range setBits(bm) {
+				if pos < len(s.fields) {
+					names = append(names, s.fields[pos].name)
+				}
+			}
+		case strings.Contains(bm, "-"):
+			parent, child, _ := strings.Cut(bm, "-")
+			parentPos, err := strconv.Atoi(parent)
+			if err != nil || parentPos < 0 || parentPos >= len(s.fields) {
+				continue
+			}
+			pf := s.fields[parentPos]
+			for _, pos := range setBits(child) {
+				if pos < len(pf.children) {
+					names = append(names, pf.name+"."+pf.children[pos])
+				}
+			}
 		}
 	}
 	return names
 }
 
-// hexToBitset converts a hex string to a slice of bools representing bit positions.
-// The bit ordering follows Salesforce's convention: LSB of each byte first, bytes reversed.
-func hexToBitset(hex string) []bool {
-	var bits []bool
+func hasHexPrefix(s string) bool {
+	return strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X")
+}
+
+// setBits returns the set bit positions of a hex bitmap. Salesforce orders bits
+// from the least significant bit of the last hex digit, i.e. the reversed
+// binary string of the whole value.
+func setBits(hex string) []int {
+	hex = strings.TrimPrefix(strings.TrimPrefix(hex, "0x"), "0X")
+	var positions []int
+	pos := 0
 	for i := len(hex) - 1; i >= 0; i-- {
-		nibble, err := strconv.ParseUint(string(hex[i]), 16, 8)
+		nibble, err := strconv.ParseUint(hex[i:i+1], 16, 8)
 		if err != nil {
-			bits = append(bits, false, false, false, false)
-			continue
+			nibble = 0
 		}
-		bits = append(bits,
-			nibble&1 != 0,
-			nibble&2 != 0,
-			nibble&4 != 0,
-			nibble&8 != 0,
-		)
+		for b := 0; b < 4; b++ {
+			if nibble&(1<<b) != 0 {
+				positions = append(positions, pos)
+			}
+			pos++
+		}
 	}
-	return bits
+	return positions
 }
 
-type avroSchema struct {
-	Fields []avroField `json:"fields"`
-}
-
-type avroField struct {
-	Name string      `json:"name"`
-	Type interface{} `json:"type"`
-}
-
-func parseAvroSchema(schemaJSON string) (*avroSchema, error) {
-	var schema avroSchema
-	if err := json.Unmarshal([]byte(schemaJSON), &schema); err != nil {
-		return nil, err
-	}
-	return &schema, nil
-}
-
-// getNestedFields extracts field definitions from a union or record type.
-func getNestedFields(fieldType interface{}) []avroField {
-	switch t := fieldType.(type) {
-	case []interface{}:
-		// Union type: find the record within it
-		for _, item := range t {
-			if fields := getNestedFields(item); fields != nil {
-				return fields
+// nestedFieldNames returns the field names of a record type, looking through
+// unions such as ["null", {"type":"record",...}].
+func nestedFieldNames(t any) []string {
+	switch v := t.(type) {
+	case []any:
+		for _, item := range v {
+			if names := nestedFieldNames(item); names != nil {
+				return names
 			}
 		}
-	case map[string]interface{}:
-		if fields, ok := t["fields"]; ok {
-			if fieldSlice, ok := fields.([]interface{}); ok {
-				var result []avroField
-				for _, f := range fieldSlice {
-					if fMap, ok := f.(map[string]interface{}); ok {
-						af := avroField{
-							Name: fmt.Sprintf("%v", fMap["name"]),
-							Type: fMap["type"],
-						}
-						result = append(result, af)
-					}
-				}
-				return result
+	case map[string]any:
+		fields, ok := v["fields"].([]any)
+		if !ok {
+			return nil
+		}
+		names := make([]string, 0, len(fields))
+		for _, f := range fields {
+			if fm, ok := f.(map[string]any); ok {
+				names = append(names, fmt.Sprint(fm["name"]))
 			}
 		}
+		return names
 	}
 	return nil
 }
