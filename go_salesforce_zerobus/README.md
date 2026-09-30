@@ -10,7 +10,7 @@ Streams Salesforce Change Data Capture (CDC) events from **many Salesforce orgs*
 - **Credentials in Unity Catalog secrets.** Each tenant's Salesforce credentials are a [UC secret](https://docs.databricks.com/aws/en/security/secrets/unity-catalog-secrets). Access is governed by UC grants and audited.
 - **At-least-once and isolated.** A replay checkpoint advances only after Zerobus acknowledges the row. Every (org, topic) subscription has its own supervised runner, so one broken org never affects the others.
 
-It replaces the single-tenant [`../go_salesforce_zerobus_cgo`](../go_salesforce_zerobus_cgo/DEPRECATED.md), and it can run that service's configuration unchanged (see [Migrating](#migrating-from-go_salesforce_zerobus_cgo-or-the-python-service)).
+It replaces the single-tenant [`(depr) go_salesforce_zerobus_cgo`](../%28depr%29%20go_salesforce_zerobus_cgo/DEPRECATED.md), and it can run that service's configuration unchanged (see [Migrating](#migrating-from-go_salesforce_zerobus_cgo-or-the-python-service)).
 
 ## Contents
 

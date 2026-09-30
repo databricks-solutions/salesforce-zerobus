@@ -237,7 +237,7 @@ For running CDC ingestion for **many Salesforce orgs** (up to thousands) as a lo
 - **Credentials:** each tenant's Salesforce credentials are a Unity Catalog secret, readable only by the service principal.
 - **Databricks resources:** a Databricks Asset Bundle provisions them.
 
-The earlier single-tenant Go port now lives in [`go_salesforce_zerobus_cgo/`](go_salesforce_zerobus_cgo/DEPRECATED.md) and is deprecated.
+The earlier single-tenant Go port now lives in [`(depr) go_salesforce_zerobus_cgo/`](%28depr%29%20go_salesforce_zerobus_cgo/DEPRECATED.md) and is deprecated.
 
 ## Spark Structured Streaming Data Source
 
