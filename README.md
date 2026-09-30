@@ -226,6 +226,19 @@ INFO - Received CustomObject__c DELETE 001def456abc789
 - Need to minimize data volume and processing
 - Want separate tables per object type
 
+## Multi-Tenant Go Service
+
+For running CDC ingestion for **many Salesforce orgs** (up to thousands) as a long-lived service, use [`go_salesforce_zerobus/`](go_salesforce_zerobus/README.md). It is a pure-Go service: a static binary in a distroless container, running on any container platform.
+
+- **Tenant registry:** tenants are onboarded by inserting rows into a Lakebase registry; the service picks them up live, with no redeploy.
+- **Checkpoints:** ack-driven replay checkpoints are stored in Lakebase.
+- **Scale-out:** hash-sharded replicas.
+- **Isolation:** each org and topic is supervised separately.
+- **Credentials:** each tenant's Salesforce credentials are a Unity Catalog secret, readable only by the service principal.
+- **Databricks resources:** a Databricks Asset Bundle provisions them.
+
+The earlier single-tenant Go port now lives in [`go_salesforce_zerobus_cgo/`](go_salesforce_zerobus_cgo/DEPRECATED.md) and is deprecated.
+
 ## Spark Structured Streaming Data Source
 
 ### Bidirectional Streaming with Salesforce

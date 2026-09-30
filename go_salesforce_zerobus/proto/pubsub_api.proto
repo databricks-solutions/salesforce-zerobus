@@ -3,7 +3,7 @@
 syntax = "proto3";
 package eventbus.v1;
 
-option go_package = "github.com/databricks-solutions/go-salesforce-zerobus/proto/gen";
+option go_package = "github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/proto/pubsubpb";
 
 message TopicInfo {
   string topic_name = 1;

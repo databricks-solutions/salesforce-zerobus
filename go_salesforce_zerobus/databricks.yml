@@ -1,0 +1,141 @@
+# Databricks-side infrastructure for the go_salesforce_zerobus service.
+#
+# The service itself runs as a container on any platform (see README); this
+# bundle only declares what lives in the Databricks workspace:
+#   - a Lakebase Postgres project (tenant registry, checkpoints, status)
+#   - a dedicated Unity Catalog schema for tenant credentials, stored as
+#     Unity Catalog secrets (uc-secret://<catalog>.<schema>.<secret>)
+# The CDC target tables are governed separately: the service principal needs
+# USE CATALOG, USE SCHEMA, and CREATE TABLE (or SELECT + MODIFY on
+# pre-created tables) on the target schema; see README "Quick start".
+# After deploy, the postdeploy hook (run as you, the deployer) grants the
+# service principal a Postgres role and READ SECRET on the secrets schema.
+# The service creates and owns its own Postgres schema and Delta tables.
+#
+#   databricks bundle deploy -t dev --var service_principal_app_id=<uuid> --profile <profile>
+
+bundle:
+  name: go-salesforce-zerobus
+
+variables:
+  service_principal_app_id:
+    description: Application ID of the service principal the service runs as (DATABRICKS_CLIENT_ID).
+  lakebase_project:
+    description: Lakebase project ID. The endpoint path is projects/<id>/branches/production/endpoints/primary.
+    default: salesforce-zerobus
+  catalog:
+    description: Catalog for the tenant secrets schema (must exist; the service principal needs USE CATALOG on it).
+    default: main
+  secrets_schema:
+    description: Schema created to hold tenant credentials as Unity Catalog secrets.
+    default: salesforce_zerobus_secrets
+  min_cu:
+    description: Lakebase autoscaling minimum. Checkpoint and registry traffic is small (one batched upsert per replica every few seconds).
+    default: 0.5
+  max_cu:
+    description: Lakebase autoscaling maximum.
+    default: 2
+  protect_branch:
+    description: Protect the production branch from deletion and reset.
+    default: false
+
+resources:
+  postgres_projects:
+    lakebase:
+      project_id: ${var.lakebase_project}
+      display_name: salesforce-zerobus registry and checkpoints
+      pg_version: 17
+      default_endpoint_settings:
+        autoscaling_limit_min_cu: ${var.min_cu}
+        autoscaling_limit_max_cu: ${var.max_cu}
+        suspend_timeout_duration: 300s
+      custom_tags:
+        - key: app
+          value: salesforce-zerobus
+      permissions:
+        - service_principal_name: ${var.service_principal_app_id}
+          level: CAN_USE
+
+  postgres_branches:
+    production:
+      parent: ${resources.postgres_projects.lakebase.id}
+      branch_id: production
+      no_expiry: true
+      is_protected: ${var.protect_branch}
+      # Adopts the branch Lakebase creates with the project; only affects creation.
+      replace_existing: true
+
+  postgres_endpoints:
+    primary:
+      parent: ${resources.postgres_branches.production.id}
+      endpoint_id: primary
+      endpoint_type: ENDPOINT_TYPE_READ_WRITE
+      autoscaling_limit_min_cu: ${var.min_cu}
+      autoscaling_limit_max_cu: ${var.max_cu}
+      # The service commits every few seconds, so the endpoint rarely suspends.
+      suspend_timeout_duration: 300s
+      replace_existing: true
+
+  schemas:
+    tenant_secrets:
+      catalog_name: ${var.catalog}
+      name: ${var.secrets_schema}
+      comment: Salesforce tenant credentials for go_salesforce_zerobus, stored as Unity Catalog secrets. Grants are applied by the postdeploy bootstrap.
+
+experimental:
+  # Keep the secrets schema name stable in development mode (no dev_<user>_
+  # prefix), so secret references are the same across targets.
+  skip_name_prefix_for_schema: true
+  scripts:
+    # Runs as the deployer and is idempotent (`make bootstrap` re-runs it):
+    #  1. Lakebase: the service principal's Postgres role + CONNECT/CREATE.
+    #  2. UC secrets: USE SCHEMA + READ SECRET on the secrets schema. (Bundles
+    #     cannot grant secret privileges or declare UC secrets themselves.)
+    postdeploy: >-
+      go run ./cmd/zerobus bootstrap lakebase
+      -sp ${var.service_principal_app_id}
+      -endpoint projects/${var.lakebase_project}/branches/production/endpoints/primary
+      && go run ./cmd/zerobus bootstrap uc-secrets
+      -sp ${var.service_principal_app_id}
+      -schema ${var.catalog}.${var.secrets_schema}
+
+targets:
+  dev:
+    default: true
+    mode: development
+
+  prod:
+    mode: production
+    workspace:
+      # One deployment copy per deployer; use a service principal to deploy prod in CI.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      protect_branch: true
+    resources:
+      postgres_projects:
+        lakebase:
+          lifecycle:
+            prevent_destroy: true
+      schemas:
+        tenant_secrets:
+          lifecycle:
+            prevent_destroy: true
+
+  # Short-lived branch of production for integration tests:
+  #   databricks bundle deploy -t ci ... && SFZB_LAKEBASE_ENDPOINT=projects/<id>/branches/ci/endpoints/ci make test-integration
+  ci:
+    mode: development
+    resources:
+      postgres_branches:
+        ci:
+          parent: ${resources.postgres_projects.lakebase.id}
+          branch_id: ci
+          source_branch: ${resources.postgres_branches.production.id}
+          ttl: 14400s
+      postgres_endpoints:
+        ci:
+          parent: ${resources.postgres_branches.ci.id}
+          endpoint_id: ci
+          endpoint_type: ENDPOINT_TYPE_READ_WRITE
+          autoscaling_limit_min_cu: 0.5
+          autoscaling_limit_max_cu: 1

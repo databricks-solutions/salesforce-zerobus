@@ -1,14 +1,19 @@
+// Row format written to the Zerobus target Delta table.
+//
+// proto2 is required by Zerobus. Fields 1-16 are the original schema shared
+// with the Python service and go_salesforce_zerobus_cgo; never renumber or
+// retype them. New fields are additive and map to nullable Delta columns.
 syntax = "proto2";
 
 package salesforce_events;
 
-option go_package = "github.com/databricks-solutions/go-salesforce-zerobus/proto/gen";
+option go_package = "github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/proto/eventpb";
 
 message SalesforceEvent {
     optional string event_id = 1;
     optional string schema_id = 2;
-    optional string replay_id = 3;
-    optional int64 timestamp = 4;
+    optional string replay_id = 3;           // hex-encoded Salesforce replay ID
+    optional int64 timestamp = 4;            // ingest time, epoch millis
 
     optional string change_type = 5;
     optional string entity_name = 6;
@@ -21,9 +26,18 @@ message SalesforceEvent {
 
     optional string record_data_json = 10;
 
-    optional bytes payload_binary = 15;
-    optional string schema_json = 16;
+    optional bytes payload_binary = 15;      // raw Avro payload
+    optional string schema_json = 16;        // Avro schema for payload_binary
 
     optional string org_id = 11;
     optional int64 processed_timestamp = 12;
+
+    // Multi-tenant additions (go_salesforce_zerobus).
+    optional string topic = 17;              // e.g. /data/AccountChangeEvent
+    optional string tenant_key = 18;         // tenant key from tenants.yaml
+    optional string decode_error = 19;       // set when the payload could not be decoded or the row was truncated
+    optional int64 commit_number = 20;       // ChangeEventHeader.commitNumber
+    optional int32 sequence_number = 21;     // ChangeEventHeader.sequenceNumber
+    optional string transaction_key = 22;    // ChangeEventHeader.transactionKey
+    optional string commit_user = 23;        // ChangeEventHeader.commitUser
 }

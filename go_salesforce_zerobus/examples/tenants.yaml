@@ -1,0 +1,36 @@
+# Tenant import format for `zerobus tenants apply -f examples/tenants.yaml`
+# (bulk onboarding / GitOps). The runtime source of truth is the Lakebase
+# registry; this file is upserted into it. `-prune` deletes tenants and
+# subscriptions not listed here.
+version: 1
+defaults:
+  table: main.salesforce_cdc.cdc_events        # written into rows without a table
+  salesforce: { api_version: "62.0", token_ttl: 1h }
+  subscription: { replay_default: LATEST, on_replay_expired: EARLIEST, batch_size: 100, max_unacked: 500 }
+tenants:
+  - key: acme-prod                              # [a-z0-9][a-z0-9_-]{0,63}; stable (it is the shard hash input)
+    org_id: 00D5g000000AbCdEAA                  # optional; verified after login
+    labels: { tier: gold }
+    salesforce:
+      instance_url: https://acme.my.salesforce.com
+      auth:
+        type: oauth_client_credentials
+        client_id: 3MVG9EXAMPLE
+        client_secret_ref: uc-secret://main.salesforce_zerobus_secrets.acme_prod#client_secret
+    subscriptions:
+      - topic: /data/ChangeEvents
+      - topic: /data/OpportunityChangeEvent
+        table: main.sales.opportunity_cdc
+        replay_default: EARLIEST
+
+  - key: globex-uat
+    shard: 3                                    # optional pin for a very large org
+    salesforce:
+      instance_url: https://globex--uat.sandbox.my.salesforce.com
+      auth:
+        type: soap
+        username_ref: env://GLOBEX_USERNAME
+        password_ref: file:///var/run/secrets/globex/password
+        security_token_ref: file:///var/run/secrets/globex/token
+    subscriptions:
+      - topic: /data/AccountChangeEvent

@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <!-- Source for docs/architecture.png. Render: rsvg-convert -z 2 -o docs/architecture.png docs/architecture.svg -->
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0F172A" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748B"/>
+    </marker>
+    <linearGradient id="svc" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#15233B"/>
+      <stop offset="1" stop-color="#1E3354"/>
+    </linearGradient>
+    <clipPath id="c-sf"><rect x="60" y="210" width="300" height="290" rx="20"/></clipPath>
+    <clipPath id="c-zb"><rect x="1130" y="160" width="410" height="150" rx="20"/></clipPath>
+    <clipPath id="c-delta"><rect x="1130" y="370" width="410" height="150" rx="20"/></clipPath>
+    <clipPath id="c-lb"><rect x="470" y="620" width="270" height="190" rx="20"/></clipPath>
+    <clipPath id="c-uc"><rect x="760" y="620" width="270" height="190" rx="20"/></clipPath>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0" y="0" width="1600" height="900" rx="28" fill="#F6F7F9"/>
+
+  <!-- title -->
+  <text x="60" y="78" font-size="34" font-weight="700" fill="#0F172A">go_salesforce_zerobus</text>
+  <text x="60" y="112" font-size="19" fill="#475569">Multi-tenant Salesforce CDC → Databricks Delta, in pure Go</text>
+
+  <!-- ============ Salesforce orgs ============ -->
+  <g filter="url(#shadow)">
+    <rect x="84" y="186" width="300" height="290" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <rect x="72" y="198" width="300" height="290" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <rect x="60" y="210" width="300" height="290" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+  </g>
+  <rect x="60" y="210" width="300" height="8" fill="#0B84C6" clip-path="url(#c-sf)"/>
+  <!-- cloud glyph -->
+  <g fill="#0B84C6" opacity="0.9">
+    <circle cx="104" cy="268" r="16"/><circle cx="126" cy="258" r="20"/><circle cx="150" cy="268" r="15"/>
+    <rect x="88" y="268" width="78" height="16" rx="8"/>
+  </g>
+  <text x="84" y="330" font-size="25" font-weight="700" fill="#0F172A">Salesforce orgs</text>
+  <text x="84" y="360" font-size="17" fill="#64748B">thousands of tenants</text>
+  <rect x="84" y="388" width="196" height="34" rx="17" fill="#E0F2FE"/>
+  <text x="182" y="411" font-size="15" font-weight="600" fill="#075985" text-anchor="middle">Change Data Capture</text>
+  <rect x="84" y="432" width="196" height="34" rx="17" fill="#E0F2FE"/>
+  <text x="182" y="455" font-size="15" font-weight="600" fill="#075985" text-anchor="middle">Pub/Sub API · gRPC</text>
+
+  <!-- ============ Service ============ -->
+  <g filter="url(#shadow)">
+    <rect x="470" y="160" width="560" height="360" rx="24" fill="url(#svc)"/>
+  </g>
+  <text x="506" y="214" font-size="26" font-weight="700" fill="#FFFFFF">Ingestion service</text>
+  <text x="506" y="243" font-size="16" fill="#94A3B8">static Go binary · runs on any container platform</text>
+  <!-- shards -->
+  <g font-size="16" font-weight="600" text-anchor="middle">
+    <rect x="506" y="270" width="150" height="46" rx="12" fill="#26406A"/>
+    <text x="581" y="299" fill="#E2E8F0">shard 0</text>
+    <rect x="672" y="270" width="150" height="46" rx="12" fill="#26406A"/>
+    <text x="747" y="299" fill="#E2E8F0">shard 1</text>
+    <rect x="838" y="270" width="156" height="46" rx="12" fill="#26406A" stroke="#3B5B8F" stroke-dasharray="5 4"/>
+    <text x="916" y="299" fill="#E2E8F0">shard N</text>
+  </g>
+  <!-- features -->
+  <g font-size="17" fill="#E2E8F0">
+    <circle cx="516" cy="358" r="5" fill="#38BDF8"/>
+    <text x="532" y="364">One isolated runner per org and topic</text>
+    <circle cx="516" cy="398" r="5" fill="#38BDF8"/>
+    <text x="532" y="404">Credit-based flow control (no unbounded buffers)</text>
+    <circle cx="516" cy="438" r="5" fill="#38BDF8"/>
+    <text x="532" y="444">Batched, ack-tracked writes · at-least-once</text>
+    <circle cx="516" cy="478" r="5" fill="#38BDF8"/>
+    <text x="532" y="484">Health, readiness, Prometheus metrics</text>
+  </g>
+
+  <!-- ============ Zerobus ============ -->
+  <g filter="url(#shadow)">
+    <rect x="1130" y="160" width="410" height="150" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+  </g>
+  <rect x="1130" y="160" width="8" height="150" fill="#FF3621" clip-path="url(#c-zb)"/>
+  <text x="1164" y="212" font-size="25" font-weight="700" fill="#0F172A">Zerobus Ingest</text>
+  <text x="1164" y="242" font-size="17" fill="#64748B">direct streaming writes to Delta</text>
+  <text x="1164" y="270" font-size="17" fill="#64748B">no message bus in between</text>
+
+  <!-- ============ Delta ============ -->
+  <g filter="url(#shadow)">
+    <rect x="1130" y="370" width="410" height="150" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+  </g>
+  <rect x="1130" y="370" width="8" height="150" fill="#FF3621" clip-path="url(#c-delta)"/>
+  <text x="1164" y="422" font-size="25" font-weight="700" fill="#0F172A">Delta tables</text>
+  <text x="1164" y="452" font-size="17" fill="#64748B">governed by Unity Catalog</text>
+  <text x="1164" y="480" font-size="17" fill="#64748B">shared or per-tenant tables</text>
+
+  <!-- ============ Operator ============ -->
+  <g filter="url(#shadow)">
+    <rect x="60" y="620" width="300" height="190" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+  </g>
+  <!-- person glyph -->
+  <g fill="#475569">
+    <circle cx="104" cy="668" r="13"/>
+    <path d="M82,706 a22,20 0 0 1 44,0 z"/>
+  </g>
+  <text x="140" y="676" font-size="25" font-weight="700" fill="#0F172A">Operator</text>
+  <text x="84" y="740" font-size="17" fill="#64748B">onboard a tenant:</text>
+  <text x="84" y="768" font-size="17" fill="#334155">1. create a UC secret</text>
+  <text x="84" y="794" font-size="17" fill="#334155">2. INSERT registry rows</text>
+
+  <!-- ============ Lakebase ============ -->
+  <g filter="url(#shadow)">
+    <rect x="470" y="620" width="270" height="190" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+  </g>
+  <rect x="470" y="620" width="270" height="8" fill="#0F9D8A" clip-path="url(#c-lb)"/>
+  <!-- db glyph -->
+  <g fill="none" stroke="#0F9D8A" stroke-width="3">
+    <ellipse cx="510" cy="668" rx="18" ry="7"/>
+    <path d="M492,668 v22 a18,7 0 0 0 36,0 v-22"/>
+  </g>
+  <text x="542" y="678" font-size="23" font-weight="700" fill="#0F172A">Lakebase</text>
+  <text x="494" y="730" font-size="16" fill="#64748B">tenant registry</text>
+  <text x="494" y="756" font-size="16" fill="#64748B">replay checkpoints</text>
+  <text x="494" y="782" font-size="16" fill="#64748B">subscription status</text>
+
+  <!-- ============ UC secrets ============ -->
+  <g filter="url(#shadow)">
+    <rect x="760" y="620" width="270" height="190" rx="20" fill="#FFFFFF" stroke="#E2E8F0"/>
+  </g>
+  <rect x="760" y="620" width="270" height="8" fill="#7C3AED" clip-path="url(#c-uc)"/>
+  <!-- lock glyph -->
+  <g>
+    <rect x="786" y="666" width="30" height="24" rx="5" fill="#7C3AED"/>
+    <path d="M792,666 v-7 a9,9 0 0 1 18,0 v7" fill="none" stroke="#7C3AED" stroke-width="3.5"/>
+  </g>
+  <text x="832" y="678" font-size="23" font-weight="700" fill="#0F172A">UC secrets</text>
+  <text x="784" y="730" font-size="16" fill="#64748B">one secret per tenant</text>
+  <text x="784" y="756" font-size="16" fill="#64748B">READ SECRET grant only</text>
+  <text x="784" y="782" font-size="16" fill="#64748B">audited in system tables</text>
+
+  <!-- ============ arrows ============ -->
+  <g stroke="#64748B" stroke-width="2.5" fill="none" marker-end="url(#arrow)">
+    <path d="M362,345 H466"/>
+    <path d="M1032,235 H1126"/>
+    <path d="M1335,312 V366"/>
+    <path d="M605,616 V524" marker-start="url(#arrow)"/>
+    <path d="M895,616 V524"/>
+    <path d="M362,715 H466"/>
+    <path d="M210,812 V852 H895 V814"/>
+  </g>
+  <g font-size="14" font-weight="600" fill="#475569">
+    <text x="414" y="334" text-anchor="middle">subscribe</text>
+    <text x="1079" y="224" text-anchor="middle">rows</text>
+    <text x="1346" y="346">commit</text>
+    <text x="617" y="576">registry · checkpoints</text>
+    <text x="907" y="576">credentials</text>
+    <text x="414" y="704" text-anchor="middle">INSERT</text>
+    <text x="552" y="842" text-anchor="middle">create secret</text>
+  </g>
+</svg>
