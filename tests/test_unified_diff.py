@@ -77,7 +77,9 @@ def test_crlf_is_preserved():
 def test_bad_hash_keeps_prev():
     prev = "line1\nline2\nline3"
     new = "line1\nLINE2\nline3"
-    diff = _make_diff(new, "@@ -1,3 +1,3 @@", [" line1", "-line2", "+LINE2", " line3"], bad_hash=True)
+    diff = _make_diff(
+        new, "@@ -1,3 +1,3 @@", [" line1", "-line2", "+LINE2", " line3"], bad_hash=True
+    )
     # Reconstructed value's hash won't match the (tampered) header -> keep the prior value.
     assert apply_unified_diff(prev, diff) == prev
 

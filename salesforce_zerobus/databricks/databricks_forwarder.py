@@ -9,13 +9,13 @@ import logging
 import os
 import time
 
+from zerobus.sdk.aio import ZerobusSdk
 from zerobus.sdk.shared import (
     AckCallback,
     StreamConfigurationOptions,
     TableProperties,
     ZerobusException,
 )
-from zerobus.sdk.aio import ZerobusSdk
 
 from ..pubsub.proto import salesforce_events_pb2
 
@@ -49,6 +49,7 @@ class DatabricksForwarder:
         client_secret: str,
         table_name: str,
         stream_config_options: dict = None,
+        sdk=None,
     ):
         """
         Initialize the Databricks forwarder.
@@ -63,15 +64,15 @@ class DatabricksForwarder:
                 Available options (recovery is always enabled):
                 - max_inflight_records (int): Max records in flight (default: 50,000)
                 - recovery_retries (int): Number of recovery attempts (default: 5)
-                - recovery_timeout_ms (int): Recovery timeout per attempt (default: 30,000ms)
+                - recovery_timeout_ms (int): Recovery timeout per attempt (default: 15,000ms)
                 - recovery_backoff_ms (int): Backoff between attempts (default: 5,000ms)
-                - server_lack_of_ack_timeout_ms (int): Server unresponsive timeout (default: 60,000ms)
+                - server_lack_of_ack_timeout_ms (int): Server unresponsive timeout (default: 180,000ms)
                 - flush_timeout_ms (int): Stream flush timeout (default: 300,000ms)
                 - ack_callback (callable): Acknowledgment callback function (default: debug logging)
                 Note: recovery is always True for maximum reliability
                 Note: OAuth credentials are passed directly to create_stream(), not via token_factory
         """
-        # v0.3.0 requires https:// scheme on endpoints
+        # The Zerobus SDK requires an https:// scheme on the ingest endpoint.
         if not ingest_endpoint.startswith("https://"):
             ingest_endpoint = f"https://{ingest_endpoint}"
 
@@ -81,9 +82,9 @@ class DatabricksForwarder:
         self.client_secret = client_secret
         self.table_name = table_name
 
-
-        # ZerobusSdk requires server_endpoint and unity_catalog_url as a named parameter
-        self.sdk = ZerobusSdk(ingest_endpoint, unity_catalog_url=workspace_url)
+        # ZerobusSdk requires server_endpoint and unity_catalog_url as a named parameter.
+        # An `sdk` may be injected for testing (fake in-memory SDK/stream).
+        self.sdk = sdk or ZerobusSdk(ingest_endpoint, unity_catalog_url=workspace_url)
 
         self.table_properties = TableProperties(
             table_name, salesforce_events_pb2.SalesforceEvent.DESCRIPTOR
@@ -135,10 +136,7 @@ class DatabricksForwarder:
         try:
             # Pass OAuth credentials directly to create_stream (per SDK best practices)
             self.stream = await self.sdk.create_stream(
-                self.client_id,
-                self.client_secret,
-                self.table_properties,
-                self.stream_config
+                self.client_id, self.client_secret, self.table_properties, self.stream_config
             )
             self.logger.info(f"Initialized Zerobus stream to table: {self.table_name}")
         except Exception as e:
@@ -146,18 +144,18 @@ class DatabricksForwarder:
             self.stream = None
             raise
 
-    async def forward_event(
+    def build_record(
         self,
         salesforce_event_data: dict,
         org_id: str,
         payload_binary: bytes = None,
         schema_json: str = None,
-    ):
+    ) -> "salesforce_events_pb2.SalesforceEvent":
         """
-        Convert Salesforce CDC event to protobuf and forward to Databricks.
+        Convert a decoded Salesforce CDC event into a SalesforceEvent protobuf message.
 
-        The Zerobus SDK handles automatic recovery, stream recreation, and error handling.
-        This method focuses purely on data transformation and ingestion.
+        Pure transform (no I/O) so it is trivially unit-testable and can be batched by the
+        caller before ingestion.
 
         Args:
             salesforce_event_data: Decoded Salesforce event data
@@ -165,10 +163,6 @@ class DatabricksForwarder:
             payload_binary: Raw Avro binary payload from Salesforce (optional)
             schema_json: Avro schema JSON string for parsing (optional)
         """
-        # Initialize stream if not already created
-        if not self.stream:
-            await self.initialize_stream()
-
         # Extract event data
         event_id = salesforce_event_data.get("event_id", "")
         schema_id = salesforce_event_data.get("schema_id", "")
@@ -192,17 +186,21 @@ class DatabricksForwarder:
             "converted_nulled_fields",
             "converted_diff_fields",
         ]
-        record_data = {
-            k: v for k, v in salesforce_event_data.items() if k not in excluded_keys
-        }
+        record_data = {k: v for k, v in salesforce_event_data.items() if k not in excluded_keys}
         record_data_json = json.dumps(record_data)
 
-        # Create protobuf message
-        pb_event = salesforce_events_pb2.SalesforceEvent(
+        # Use the Salesforce commit timestamp (epoch ms) from the ChangeEventHeader as the
+        # event `timestamp`, not the forwarder's wall clock. commitTimestamp is the true
+        # event time and is monotonic with replay order, so downstream sequencing and any
+        # time-based reasoning are accurate. `processed_timestamp` remains the wall clock.
+        commit_ts = change_header.get("commitTimestamp")
+        event_timestamp = int(commit_ts) if commit_ts is not None else int(time.time() * 1000)
+
+        return salesforce_events_pb2.SalesforceEvent(
             event_id=event_id,
             schema_id=schema_id,
             replay_id=replay_id,
-            timestamp=int(time.time() * 1000),
+            timestamp=event_timestamp,
             change_type=change_type,
             entity_name=entity_name,
             change_origin=change_origin,
@@ -217,50 +215,79 @@ class DatabricksForwarder:
             processed_timestamp=int(time.time() * 1000),
         )
 
+    async def recreate(self):
+        """Recreate the underlying Zerobus stream after a permanent failure."""
+        self.stream = await self.sdk.recreate_stream(self.stream)
+        self.logger.info("Successfully recreated Zerobus stream")
+
+    async def ingest_batch(self, records: list) -> int:
+        """
+        Submit a batch of protobuf records and return the batch's final offset.
+
+        Does NOT wait for durability — call ``wait_durable(offset)`` for that. Raises
+        ``ZerobusException`` on permanent stream failure; the caller is responsible for
+        ``recreate()`` + retry (so it can keep its checkpoint pinned until durable).
+        """
+        if not self.stream:
+            await self.initialize_stream()
+        return await self.stream.ingest_records_offset(records)
+
+    async def ingest_batch_nowait(self, records: list):
+        """Submit a batch fire-and-forget (no offset, no durability wait).
+
+        Durability is handled asynchronously by the SDK's background sender; use
+        ``flush()`` (e.g. on shutdown) to ensure buffered records are sent.
+        """
+        if not self.stream:
+            await self.initialize_stream()
+        self.stream.ingest_records_nowait(records)
+
+    async def wait_durable(self, offset: int):
+        """Block until all records up to ``offset`` are durably written to Delta."""
+        await self.stream.wait_for_offset(offset)
+
+    async def forward_event(
+        self,
+        salesforce_event_data: dict,
+        org_id: str,
+        payload_binary: bytes = None,
+        schema_json: str = None,
+    ):
+        """
+        Single-record convenience path: transform, ingest, and block until durable.
+
+        The batched consumer in ``core.py`` uses ``build_record`` + ``ingest_batch`` +
+        ``wait_durable`` directly; this wrapper is kept for backward compatibility and
+        now provides a real durability barrier (logs success only after the record is
+        durably written).
+        """
+        pb_event = self.build_record(salesforce_event_data, org_id, payload_binary, schema_json)
+        record_ids = pb_event.record_ids
+        record_id = record_ids[0] if record_ids else "unknown"
+
         try:
-            # Ingest the record - SDK handles all recovery automatically
-            await self.stream.ingest_record_offset(pb_event)
-
-            # Log successful ingestion
-            record_id = record_ids[0] if record_ids else "unknown"
-            self.logger.info(
-                f"Ingested to Databricks: {self.table_name} - {entity_name} {change_type} {record_id}"
-            )
-
+            offset = await self.ingest_batch([pb_event])
+            await self.wait_durable(offset)
         except ZerobusException as e:
-            # Per Zerobus docs: ZerobusException means stream permanently failed after all SDK recovery attempts
-            # Client is responsible for handling the failure using recreate_stream()
+            # Permanent stream failure after all SDK recovery attempts: recreate and retry
+            # the same record so nothing is dropped.
             self.logger.warning(
-                f"Stream permanently failed after SDK recovery attempts, recreating. Error: {e}. "
-                f"This may be cascading from Salesforce connection issues if they occurred recently."
+                f"Stream permanently failed after SDK recovery attempts, recreating. Error: {e}."
             )
-
             try:
-                # Use SDK's recreate_stream method as documented
-                self.stream = await self.sdk.recreate_stream(self.stream)
-                self.logger.info("Successfully recreated failed stream")
-
-                # Retry the ingestion with the new stream
-                await self.stream.ingest_record_offset(pb_event)
-
-                # Log successful retry
-                record_id = record_ids[0] if record_ids else "unknown"
-                self.logger.info(
-                    f"Retry successful - Ingested to Databricks: {self.table_name} - {entity_name} {change_type} {record_id}"
-                )
-
+                await self.recreate()
+                offset = await self.stream.ingest_records_offset([pb_event])
+                await self.wait_durable(offset)
             except Exception as retry_error:
-                # If recreate_stream or retry fails, this indicates a more serious issue
-                self.logger.error(
-                    f"Failed to recreate stream or retry ingestion: {retry_error}"
-                )
+                self.logger.error(f"Failed to recreate stream or retry ingestion: {retry_error}")
                 self.stream = None  # Force reinitialization on next attempt
                 raise
 
-        except Exception as e:
-            # Handle unexpected errors
-            self.logger.error(f"Unexpected error forwarding event to Databricks: {e}")
-            raise
+        # Log only AFTER durability is confirmed.
+        self.logger.info(
+            f"Durably ingested: {self.table_name} - {pb_event.entity_name} "
+            f"{pb_event.change_type} {record_id}"
+        )
 
     async def flush(self):
         """Flush any pending records to ensure they're written."""
@@ -270,9 +297,7 @@ class DatabricksForwarder:
                 self.logger.debug("Flushed pending records to Databricks")
             except ZerobusException as e:
                 # Per Zerobus docs: recreate stream if flush fails with ZerobusException
-                self.logger.warning(
-                    f"Flush failed, stream permanently failed, recreating: {e}"
-                )
+                self.logger.warning(f"Flush failed, stream permanently failed, recreating: {e}")
                 self.stream = await self.sdk.recreate_stream(self.stream)
                 self.logger.info("Successfully recreated stream after flush failure")
                 # Retry flush with new stream
@@ -318,9 +343,9 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
         Optional ZerobusSdk Stream Configuration (recovery always enabled):
         - ZEROBUS_MAX_INFLIGHT_RECORDS: Max records in flight (default: 50000)
         - ZEROBUS_RECOVERY_RETRIES: Recovery attempt count (default: 5)
-        - ZEROBUS_RECOVERY_TIMEOUT_MS: Recovery timeout per attempt (default: 30000)
+        - ZEROBUS_RECOVERY_TIMEOUT_MS: Recovery timeout per attempt (default: 15000)
         - ZEROBUS_RECOVERY_BACKOFF_MS: Backoff between attempts (default: 5000)
-        - ZEROBUS_SERVER_ACK_TIMEOUT_MS: Server unresponsive timeout (default: 60000)
+        - ZEROBUS_SERVER_ACK_TIMEOUT_MS: Server unresponsive timeout (default: 180000)
         - ZEROBUS_FLUSH_TIMEOUT_MS: Stream flush timeout (default: 300000)
     """
     # Use provided table name or fallback to environment variable
@@ -346,22 +371,16 @@ def create_forwarder_from_env(table_name=None) -> DatabricksForwarder:
     stream_config = {}
 
     if os.getenv("ZEROBUS_MAX_INFLIGHT_RECORDS"):
-        stream_config["max_inflight_records"] = int(
-            os.getenv("ZEROBUS_MAX_INFLIGHT_RECORDS")
-        )
+        stream_config["max_inflight_records"] = int(os.getenv("ZEROBUS_MAX_INFLIGHT_RECORDS"))
 
     if os.getenv("ZEROBUS_RECOVERY_RETRIES"):
         stream_config["recovery_retries"] = int(os.getenv("ZEROBUS_RECOVERY_RETRIES"))
 
     if os.getenv("ZEROBUS_RECOVERY_TIMEOUT_MS"):
-        stream_config["recovery_timeout_ms"] = int(
-            os.getenv("ZEROBUS_RECOVERY_TIMEOUT_MS")
-        )
+        stream_config["recovery_timeout_ms"] = int(os.getenv("ZEROBUS_RECOVERY_TIMEOUT_MS"))
 
     if os.getenv("ZEROBUS_RECOVERY_BACKOFF_MS"):
-        stream_config["recovery_backoff_ms"] = int(
-            os.getenv("ZEROBUS_RECOVERY_BACKOFF_MS")
-        )
+        stream_config["recovery_backoff_ms"] = int(os.getenv("ZEROBUS_RECOVERY_BACKOFF_MS"))
 
     if os.getenv("ZEROBUS_SERVER_ACK_TIMEOUT_MS"):
         stream_config["server_lack_of_ack_timeout_ms"] = int(

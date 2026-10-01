@@ -1,24 +1,16 @@
-"""Tests for the SalesforceZerobus startup-race fix in salesforce_zerobus/core.py.
+"""Tests for replay-position resolution in salesforce_zerobus/core.py.
 
-Background: `start()` used to `time.sleep(2)` and then resolve the subscription's replay
-mode with `auto_create_table=False`. On a slow/cold warehouse the background table-init
-hadn't finished, so the table didn't exist yet and the subscription fell back to LATEST,
-silently skipping the historical backfill. The fix waits on `_init_complete` and has the
-subscription reuse the replay decision the init path already computed
-(`_init_replay_params`).
-
-These tests build a bare SalesforceZerobus (bypassing the heavy __init__) and drive the
-two methods directly with a fake replay manager.
+The old thread + `threading.Event` startup choreography (which raced table creation and
+could silently fall back to LATEST, skipping the historical backfill) has been replaced by
+a single synchronous `_resolve_replay_params()` that the async pipeline awaits via
+`asyncio.to_thread` before subscribing. These tests drive that method directly with a fake
+replay manager.
 
 Run with the project venv (core.py imports avro/grpc/zerobus):
-    .venv/bin/python tests/test_replay_init_race.py
-Or:  .venv/bin/python -m pytest tests/test_replay_init_race.py
+    .venv/bin/python -m pytest tests/test_replay_resolution.py
 """
 
-import asyncio
 import logging
-import threading
-import time
 
 from salesforce_zerobus.core import SalesforceZerobus
 
@@ -26,71 +18,59 @@ logging.disable(logging.CRITICAL)
 
 
 class _FakeReplayManager:
-    """Mimics the race: creating the table (auto_create_table=True) is slow and yields
-    EARLIEST; the no-create path (the old subscription call) returns LATEST."""
+    """Records how it was called and returns a canned replay decision."""
 
-    def __init__(self, create_delay=0.5, raises=False):
-        self.create_delay = create_delay
+    def __init__(self, result=("EARLIEST", ""), raises=False):
+        self.result = result
         self.raises = raises
+        self.recovery_initialized = False
+        self.last_call = None
 
     def get_subscription_params(self, auto_create_table, backfill_historical):
+        self.last_call = (auto_create_table, backfill_historical)
         if self.raises:
             raise RuntimeError("simulated init failure")
-        if auto_create_table:
-            time.sleep(self.create_delay)  # slow CREATE TABLE on a cold warehouse
-            return ("EARLIEST", "")
-        return ("LATEST", "")  # table not there yet -> fallback
+        return self.result
 
     def initialize_replay_recovery(self):
-        pass
+        self.recovery_initialized = True
 
 
 def _bare_streamer(replay_manager):
     s = object.__new__(SalesforceZerobus)  # skip __init__ (needs real auth/config)
     s.logger = logging.getLogger("test")
     s._replay_manager = replay_manager
-    s._databricks_forwarder = None
     s.auto_create_table = True
     s.backfill_historical = True
-    s._init_complete = threading.Event()
-    s._init_replay_params = None
     return s
 
 
-def test_subscription_waits_and_uses_earliest():
-    """The fix: wait for the slow init, then reuse its EARLIEST decision (not LATEST)."""
-    s = _bare_streamer(_FakeReplayManager(create_delay=0.5))
-    threading.Thread(target=lambda: asyncio.run(s._initialize_databricks_async()), daemon=True).start()
-
-    assert s._init_complete.wait(timeout=10), "init never signalled completion"
-    assert s._init_replay_params == ("EARLIEST", "")
-    assert s._get_subscription_params() == ("EARLIEST", "")
-
-
-def test_no_wait_would_fall_back_to_latest():
-    """Guard documenting the original bug: resolving before init cached a result hits the
-    auto_create_table=False path, which returns LATEST."""
-    s = _bare_streamer(_FakeReplayManager())
-    # init has NOT run, so _init_replay_params is still None
-    assert s._init_replay_params is None
-    assert s._get_subscription_params() == ("LATEST", "")
+def test_resolves_earliest_and_creates_table():
+    """Table creation + backfill decision happen in one call; EARLIEST is honored."""
+    rm = _FakeReplayManager(result=("EARLIEST", ""))
+    s = _bare_streamer(rm)
+    assert s._resolve_replay_params() == ("EARLIEST", "")
+    # Resolution owns table creation (auto_create_table=True) and pre-fetches the replay id.
+    assert rm.last_call == (True, True)
+    assert rm.recovery_initialized is True
 
 
 def test_custom_resume_is_preserved():
-    """When init resolves to a stored replay_id, restarts resume (CUSTOM), not re-backfill."""
-    s = _bare_streamer(_FakeReplayManager())
-    s._init_replay_params = ("CUSTOM", "REPLAYID123")
-    assert s._get_subscription_params() == ("CUSTOM", "REPLAYID123")
+    """A stored replay id resumes (CUSTOM), rather than re-running the backfill."""
+    s = _bare_streamer(_FakeReplayManager(result=("CUSTOM", "REPLAYID123")))
+    assert s._resolve_replay_params() == ("CUSTOM", "REPLAYID123")
 
 
-def test_init_signals_completion_even_on_error():
-    """_init_complete must be set in a finally so start() never blocks forever."""
+def test_no_replay_manager_uses_latest():
+    """With replay recovery disabled there is no manager; start fresh from LATEST."""
+    s = _bare_streamer(None)
+    assert s._resolve_replay_params() == ("LATEST", "")
+
+
+def test_failure_falls_back_to_latest():
+    """A replay-manager error must not crash startup; fall back to LATEST."""
     s = _bare_streamer(_FakeReplayManager(raises=True))
-    try:
-        asyncio.run(s._initialize_databricks_async())
-    except RuntimeError:
-        pass
-    assert s._init_complete.is_set()
+    assert s._resolve_replay_params() == ("LATEST", "")
 
 
 if __name__ == "__main__":
