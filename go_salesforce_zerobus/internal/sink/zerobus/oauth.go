@@ -65,7 +65,7 @@ func newTokenProvider(zerobusEndpoint, ucEndpoint, clientID, clientSecret string
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		http:         httpc,
-		now:          time.Now,
+		now:          func() time.Time { return time.Now().Round(0) }, // wall clock: survives host sleep
 		cache:        map[string]cachedToken{},
 	}, nil
 }

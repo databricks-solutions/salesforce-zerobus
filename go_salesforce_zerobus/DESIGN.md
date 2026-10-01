@@ -115,6 +115,17 @@ Tenant credentials never live in the service's tables. The registry stores refer
 - **Resolution time:** secrets are resolved at login, not at startup, so a rotated secret takes effect on the next login after the cache expires.
 - **Limits:** UC secrets default to 100 per schema and 1,000 per metastore. These are soft limits that the account team can raise. `#field` lets one secret hold all of a tenant's credentials, which keeps the count at one per tenant.
 
+## Token lifetimes
+
+Every short-lived credential is refreshed before it expires, and every expiry is compared on the **wall clock**. Go's monotonic clock does not advance while a laptop sleeps or a container VM is suspended, so a monotonic comparison can make an expired token look valid after the machine wakes up.
+
+| Credential | Lifetime | Refresh |
+|---|---|---|
+| Databricks service principal token (SDK calls: Lakebase credentials, UC secrets, tables, SQL) | ~1h | Our own M2M token source (`internal/dbauth`) with wall-clock expiry; the SDK refreshes it ahead of expiry |
+| Lakebase database credential | `SFZB_LAKEBASE_TOKEN_TTL` (≤ 1h) | Background loop at 75% of lifetime, with retries and backoff. The current credential keeps serving while a refresh fails. Connections are recycled at 75% of the TTL. |
+| Zerobus table token | ~1h | Cached per table until 5 min before expiry; dropped when the server rejects it |
+| Salesforce session | tenant `token_ttl` | Re-login before the TTL; dropped on `UNAUTHENTICATED` |
+
 ## Zerobus authentication
 
 Streams are opened with `CreateStreamWithProvider` and the service's own token provider (`internal/sink/zerobus/oauth.go`), not the SDK's built-in OAuth.

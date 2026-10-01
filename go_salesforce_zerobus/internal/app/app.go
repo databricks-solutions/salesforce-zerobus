@@ -21,6 +21,7 @@ import (
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/checkpoint/delta"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/checkpoint/lakebase"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/config"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/dbauth"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/dbsql"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/obs"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/pubsub"
@@ -62,7 +63,13 @@ type Env struct {
 func NewEnv(ctx context.Context, cfg *config.Service, logger *slog.Logger, needLakebase bool) (*Env, error) {
 	e := &Env{Config: cfg, Logger: logger}
 	if cfg.DatabricksHost != "" {
-		w, err := databricks.NewWorkspaceClient(&databricks.Config{Host: cfg.DatabricksHost, ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret})
+		dc := &databricks.Config{Host: cfg.DatabricksHost}
+		if cfg.ClientID != "" && cfg.ClientSecret != "" {
+			// Service principal M2M with wall-clock expiry, so tokens are
+			// refreshed correctly after host sleep or container suspension.
+			dc.Credentials = dbauth.Strategy(cfg.DatabricksHost, cfg.ClientID, cfg.ClientSecret)
+		}
+		w, err := databricks.NewWorkspaceClient(dc)
 		if err != nil {
 			return nil, fmt.Errorf("databricks client: %w", err)
 		}
@@ -93,7 +100,7 @@ func (e *Env) ConnectLakebase(ctx context.Context, user string) (*pgxpool.Pool, 
 	}
 	lc := lakebase.Config{
 		Endpoint: cfg.LakebaseEndpoint, Host: cfg.LakebaseHost, Port: cfg.LakebasePort, Database: cfg.LakebaseDatabase,
-		User: user, Schema: cfg.LakebaseSchema, MaxConns: cfg.LakebaseMaxConns,
+		User: user, Schema: cfg.LakebaseSchema, MaxConns: cfg.LakebaseMaxConns, TokenTTL: cfg.LakebaseTokenTTL,
 	}
 	if ref := cfg.LakebasePassRef; ref != "" {
 		lc.Password = func(ctx context.Context) (string, error) { return e.Secrets.Resolve(ctx, ref) }

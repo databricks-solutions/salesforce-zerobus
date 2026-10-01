@@ -160,6 +160,7 @@ Flags override environment variables; `sfzb run -h` lists everything.
 | `SFZB_SHARD_INDEX`, `SFZB_SHARD_COUNT` | `0`, `1` | Jump-consistent-hash sharding on `tenant_key` (`tenants.shard_pin` overrides it) |
 | `SFZB_LAKEBASE_ENDPOINT` | — | `projects/<p>/branches/<b>/endpoints/<e>`; OAuth passwords are minted and refreshed automatically |
 | `SFZB_LAKEBASE_SCHEMA` | `sfzb` | Postgres schema for registry, status and checkpoints |
+| `SFZB_LAKEBASE_TOKEN_TTL` | `1h` | OAuth database credential lifetime (5m–1h). Refreshed in the background at 75% of it, and pooled connections are recycled before it ends. |
 | `SFZB_LAKEBASE_PASSWORD_REF` + `SFZB_LAKEBASE_USER` | — | Native Postgres login instead of OAuth |
 | `SFZB_REGISTRY_WRITERS` | — | Postgres roles to grant tenant-management access (create them with `bootstrap lakebase -writer`) |
 | `SFZB_CHECKPOINT_STORE` | `lakebase` | `lakebase`; `delta` (derived from the event table, single-tenant mode); `memory` |
@@ -305,5 +306,6 @@ See [DESIGN.md](DESIGN.md) for the internals: flow control, checkpoint invariant
 | Subscription `failed` with `unity catalog secret … not found` | Check the `client_secret_ref` name (three parts, underscores) and that the secret exists in that schema |
 | Row shows `invalid_config` | Read its `detail` in `sfzb.subscription_status`; fix the row and the service reloads it within the poll interval |
 | `bundle deploy` fails with `forced token refresh: cache update: exit status 45` | The Terraform provider's refresh of your CLI token failed. Deploy with the profile's current token: `DATABRICKS_HOST=https://<workspace> DATABRICKS_TOKEN=$(databricks auth token --profile <p> \| jq -r .access_token) DATABRICKS_CONFIG_FILE=/dev/null databricks bundle deploy -t dev --var service_principal_app_id=<sp> --var catalog=<catalog>` |
+| `lakebase credential: Invalid Token` after running for a while (older builds) | Fixed. Tokens are now refreshed in the background and expiry is tracked on the wall clock, so host sleep or a suspended container VM can no longer leave an expired token in use. Upgrade to the current build. |
 | CLI returns `Refresh token is invalid` | Sign in again: `databricks auth login --host https://<workspace> --profile <p>` |
 | Zerobus stream stays `broken` with a permission error | The service principal needs `USE CATALOG`, `USE SCHEMA` and `SELECT, MODIFY` (or `CREATE TABLE`) on the target table's schema |
