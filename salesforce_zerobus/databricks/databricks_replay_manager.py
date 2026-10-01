@@ -45,7 +45,9 @@ class DatabricksReplayManager:
         self.sql_workspace_url = self.workspace_url
 
         if not all([self.workspace_url, self.client_id, self.client_secret, self.sql_endpoint]):
-            raise ValueError("workspace_url, client_id, client_secret, and sql_endpoint are required")
+            raise ValueError(
+                "workspace_url, client_id, client_secret, and sql_endpoint are required"
+            )
 
         # Extract warehouse_id from sql_endpoint format: /sql/1.0/warehouses/{warehouse_id}
         match = re.search(r"/sql/1\.0/warehouses/([a-zA-Z0-9]+)", self.sql_endpoint)
@@ -84,14 +86,9 @@ class DatabricksReplayManager:
         try:
             oauth_url = f"{self.sql_workspace_url.rstrip('/')}/oidc/v1/token"
 
-            payload = {
-                "grant_type": "client_credentials",
-                "scope": "all-apis"
-            }
+            payload = {"grant_type": "client_credentials", "scope": "all-apis"}
 
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
             self.logger.debug(f"Requesting OAuth token from: {oauth_url}")
 
@@ -100,7 +97,7 @@ class DatabricksReplayManager:
                 data=payload,
                 headers=headers,
                 auth=(self.client_id, self.client_secret),
-                timeout=30
+                timeout=30,
             )
 
             response.raise_for_status()
@@ -116,12 +113,14 @@ class DatabricksReplayManager:
             self._oauth_token = access_token
             self._oauth_token_expires_at = time.time() + expires_in - 300
 
-            self.logger.debug(f"OAuth token generated successfully, expires in {expires_in} seconds")
+            self.logger.debug(
+                f"OAuth token generated successfully, expires in {expires_in} seconds"
+            )
             return access_token
 
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to generate OAuth token: {e}")
-            if hasattr(e, 'response') and e.response is not None:
+            if hasattr(e, "response") and e.response is not None:
                 try:
                     error_details = e.response.json()
                     self.logger.error(f"OAuth error response: {error_details}")
@@ -140,8 +139,7 @@ class DatabricksReplayManager:
             dict: Headers including Authorization with Bearer token
         """
         # Check if token needs refresh
-        if (not self._oauth_token or
-            time.time() >= self._oauth_token_expires_at):
+        if not self._oauth_token or time.time() >= self._oauth_token_expires_at:
             self.logger.debug("OAuth token expired or missing, generating new token")
             self._generate_oauth_token()
 
@@ -230,19 +228,24 @@ class DatabricksReplayManager:
         try:
             self.logger.info(f"Querying latest replay_id from {self.table_name}")
 
+            # Order by replay_id (the Salesforce ordering/resume token), NOT by the
+            # `timestamp` column. `timestamp` holds a wall-clock value that is not a
+            # reliable ordering key (ties within a commit, clock skew), so resuming from
+            # the max-timestamp row can pick the wrong replay_id and leave a permanent gap.
+            # Replay ids are stored as zero-padded lowercase hex of the 8-byte position
+            # (see core.py `evt.replay_id.hex()`), so lexicographic DESC yields the true
+            # latest even across the 10-byte/29-byte format variants Salesforce emits.
             query = f"""
-                SELECT replay_id 
-                FROM {self.table_name} 
-                ORDER BY timestamp DESC 
+                SELECT replay_id
+                FROM {self.table_name}
+                ORDER BY replay_id DESC
                 LIMIT 1
             """
 
             result = self.execute_sql_query(query, timeout=30)
 
             if result is None:
-                self.logger.info(
-                    f"No events found in {self.table_name} - starting fresh"
-                )
+                self.logger.info(f"No events found in {self.table_name} - starting fresh")
                 return None
 
             result_data = result.get("result", {})
@@ -281,9 +284,7 @@ class DatabricksReplayManager:
                 return False
 
         except Exception as e:
-            self.logger.debug(
-                f"Table existence check failed for {self.table_name}: {e}"
-            )
+            self.logger.debug(f"Table existence check failed for {self.table_name}: {e}")
             return False
 
     def create_table_if_not_exists(self) -> bool:
@@ -379,9 +380,7 @@ class DatabricksReplayManager:
                     self.logger.info("Table created - starting from LATEST")
                     return ("LATEST", "")
                 else:
-                    self.logger.warning(
-                        "Failed to create table - falling back to LATEST mode"
-                    )
+                    self.logger.warning("Failed to create table - falling back to LATEST mode")
                     return ("LATEST", "")
             else:
                 self.logger.warning(
@@ -414,20 +413,9 @@ class DatabricksReplayManager:
         Returns:
             bool: True if table exists and is accessible, False otherwise
         """
-        try:
-            query = f"DESCRIBE {self.table_name}"
-
-            # Try to describe the table
-            for row in self.sql_executor(query):
-                # If we get any results, table exists
-                self.logger.info(f"Validated table {self.table_name} exists")
-                return True
-
-            return False
-
-        except Exception as e:
-            self.logger.warning(f"Table validation failed for {self.table_name}: {e}")
-            return False
+        # Delegate to the working REST-based check (the previous implementation called a
+        # nonexistent self.sql_executor and always raised).
+        return self.table_exists()
 
     def get_table_stats(self) -> Optional[dict]:
         """
@@ -438,7 +426,7 @@ class DatabricksReplayManager:
         """
         try:
             query = f"""
-                SELECT 
+                SELECT
                     COUNT(*) as total_events,
                     MIN(timestamp) as earliest_event,
                     MAX(timestamp) as latest_event,
@@ -446,29 +434,30 @@ class DatabricksReplayManager:
                 FROM {self.table_name}
             """
 
-            for row in self.sql_executor(query):
-                stats = {
-                    "total_events": row[0],
-                    "earliest_event": row[1],
-                    "latest_event": row[2],
-                    "latest_replay_id": row[3],
-                }
+            result = self.execute_sql_query(query, timeout=30)
+            data_array = (result or {}).get("result", {}).get("data_array", [])
+            if not data_array:
+                return None
 
-                self.logger.info(
-                    f"Table stats: {stats['total_events']} events, latest: {stats['latest_replay_id']}"
-                )
-                return stats
-
-            return None
+            row = data_array[0]
+            stats = {
+                "total_events": row[0],
+                "earliest_event": row[1],
+                "latest_event": row[2],
+                "latest_replay_id": row[3],
+            }
+            self.logger.info(
+                f"Table stats: {stats['total_events']} events, "
+                f"latest: {stats['latest_replay_id']}"
+            )
+            return stats
 
         except Exception as e:
             self.logger.warning(f"Failed to get table statistics: {e}")
             return None
 
 
-def create_replay_manager_from_env(
-    table_name=None, object_name=None
-) -> DatabricksReplayManager:
+def create_replay_manager_from_env(table_name=None, object_name=None) -> DatabricksReplayManager:
     """
     Create and initialize a DatabricksReplayManager from environment variables.
 

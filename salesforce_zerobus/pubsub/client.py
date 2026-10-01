@@ -5,6 +5,8 @@ This file defines the class `PubSub`, which contains functionality for
 subscriber clients to connect to Salesforce Pub/Sub API.
 """
 
+import asyncio
+import contextlib
 import io
 import logging
 import os
@@ -18,6 +20,7 @@ import avro.io
 import avro.schema
 import certifi
 import grpc
+import grpc.aio
 import requests
 from dotenv import load_dotenv
 
@@ -28,60 +31,6 @@ load_dotenv()
 
 with open(certifi.where(), "rb") as f:
     secure_channel_credentials = grpc.ssl_channel_credentials(f.read())
-
-
-class ClientTraceInterceptor(
-    grpc.UnaryUnaryClientInterceptor, grpc.StreamStreamClientInterceptor
-):
-    """
-    gRPC interceptor to add client trace ID for debugging as per Salesforce documentation.
-    """
-
-    def __init__(self, logger=None):
-        self.logger = logger or logging.getLogger(__name__)
-
-    def _add_trace_id(self, client_call_details, request):
-        """Add unique trace ID to request metadata."""
-        trace_id = str(uuid.uuid4())
-        metadata = list(client_call_details.metadata or [])
-        metadata.append(("x-client-trace-id", trace_id))
-
-        new_call_details = client_call_details._replace(metadata=metadata)
-
-        self.logger.debug(
-            f"Request start - Trace ID: {trace_id}, Method: {client_call_details.method}"
-        )
-        return new_call_details, trace_id
-
-    def intercept_unary_unary(self, continuation, client_call_details, request):
-        """Intercept unary-unary calls to add trace ID."""
-        new_call_details, trace_id = self._add_trace_id(client_call_details, request)
-
-        try:
-            response = continuation(new_call_details, request)
-            self.logger.debug(f"Request completed - Trace ID: {trace_id}")
-            return response
-        except Exception as e:
-            self.logger.error(f"Request failed - Trace ID: {trace_id}, Error: {e}")
-            raise
-
-    def intercept_stream_stream(
-        self, continuation, client_call_details, request_iterator
-    ):
-        """Intercept stream-stream calls to add trace ID."""
-        new_call_details, trace_id = self._add_trace_id(
-            client_call_details, request_iterator
-        )
-
-        try:
-            response_iterator = continuation(new_call_details, request_iterator)
-            self.logger.debug(f"Streaming request started - Trace ID: {trace_id}")
-            return response_iterator
-        except Exception as e:
-            self.logger.error(
-                f"Streaming request failed - Trace ID: {trace_id}, Error: {e}"
-            )
-            raise
 
 
 def get_argument(key, argument_dict):
@@ -168,17 +117,14 @@ class PubSub(object):
             ),  # Keep connection for 2 hours when idle
         ]
 
-        # Create channel with trace interceptor
-        channel = grpc.secure_channel(
+        # Create an async (grpc.aio) channel. The client runs inside a single asyncio
+        # event loop. The x-client-trace-id that used to be injected via a synchronous
+        # interceptor is now attached to the per-call metadata in authenticate() instead
+        # (sync interceptors do not attach to aio channels).
+        self.channel = grpc.aio.secure_channel(
             pubsub_url, secure_channel_credentials, options=channel_options
         )
-
-        # Add client trace ID interceptor as per Salesforce documentation
-        trace_interceptor = ClientTraceInterceptor(self.logger)
-        intercepted_channel = grpc.intercept_channel(channel, trace_interceptor)
-
-        self.channel = channel
-        self.stub = pb2_grpc.PubSubStub(intercepted_channel)
+        self.stub = pb2_grpc.PubSubStub(self.channel)
         self.session_id = None
         self.pb2 = pb2
         self.topic_name = get_argument("topic", argument_dict)
@@ -188,33 +134,14 @@ class PubSub(object):
         else:
             # Otherwise, get the version from the argument
             self.apiVersion = get_argument("apiVersion", argument_dict)
-        """
-        Semaphore used for subscriptions. This keeps the subscription stream open
-        to receive events and to notify when to send the next FetchRequest.
-        See Python Quick Start for more information.
-        https://developer.salesforce.com/docs/platform/pub-sub-api/guide/qs-python-quick-start.html
-        There is probably a better way to do this. This is only sample code. Please
-        use your own discretion when writing your production Pub/Sub API client.
-        Make sure to use only one semaphore per subscribe call if you are planning
-        to share the same instance of PubSub.
-        """
-        self.semaphore = threading.Semaphore(1)
-        self.flow_controller = None  # Can be injected for enhanced flow control
-
-        # Event deduplication as per Salesforce recommendations
+        # Event deduplication as per Salesforce recommendations. Access is guarded by a
+        # lock so the dedup cache stays correct even though auth runs in a worker thread.
         self._processed_event_ids = set()
         self._max_event_ids_cache = 10000  # Limit cache size to prevent memory issues
         self._event_ids_lock = threading.Lock()
 
         # Store last RPC ID for support troubleshooting
         self._last_rpc_id = None
-
-    def set_flow_controller(self, flow_controller):
-        """
-        Inject a flow controller for enhanced semaphore management.
-        When set, the flow controller will be used instead of the basic semaphore.
-        """
-        self.flow_controller = flow_controller
 
     def _is_event_duplicate(self, event_id):
         """
@@ -234,9 +161,7 @@ class PubSub(object):
             if len(self._processed_event_ids) >= self._max_event_ids_cache:
                 # Convert to list, remove first half, convert back to set
                 event_ids_list = list(self._processed_event_ids)
-                self._processed_event_ids = set(
-                    event_ids_list[len(event_ids_list) // 2 :]
-                )
+                self._processed_event_ids = set(event_ids_list[len(event_ids_list) // 2 :])
                 self.logger.debug(
                     f"Event ID cache trimmed to {len(self._processed_event_ids)} entries"
                 )
@@ -276,9 +201,7 @@ class PubSub(object):
             )
 
         # Log successful validation
-        self.logger.debug(
-            f"Authentication headers validated: org={self.tenant_id}, url={self.url}"
-        )
+        self.logger.debug(f"Authentication headers validated: org={self.tenant_id}, url={self.url}")
 
     def _is_retryable_error(self, e):
         """
@@ -312,9 +235,7 @@ class PubSub(object):
         error_details = error.details() if hasattr(error, "details") else ""
 
         # Convert bytes replay ID to hex for logging
-        replay_id_display = (
-            last_processed_replay_id.hex() if last_processed_replay_id else "None"
-        )
+        replay_id_display = last_processed_replay_id.hex() if last_processed_replay_id else "None"
         self.logger.info(
             f"Determining retry strategy for error: {status_code}, details: {error_details}, last_replay_id: {replay_id_display}"
         )
@@ -408,9 +329,7 @@ class PubSub(object):
         if "replay" in error_details.lower() and (
             "invalid" in error_details.lower() or "corrupt" in error_details.lower()
         ):
-            self.logger.warning(
-                "Detected corrupted replay ID error - switching to LATEST"
-            )
+            self.logger.warning("Detected corrupted replay ID error - switching to LATEST")
             return ("LATEST", "")
 
         # Default retry strategy for other retryable errors
@@ -498,7 +417,7 @@ class PubSub(object):
         else:
             self.logger.error(f"Non-gRPC error {context}: {e}")
 
-    def _recreate_channel_and_stub(self):
+    async def _recreate_channel_and_stub(self):
         """
         Recreate the gRPC channel and stub to recover from connection issues.
         """
@@ -507,7 +426,7 @@ class PubSub(object):
 
             # Close existing channel if it exists
             if hasattr(self, "channel") and self.channel:
-                self.channel.close()
+                await self.channel.close()
 
             # Recreate channel with original configuration
             # Use stored grpc_host and grpc_port from initialization
@@ -546,19 +465,13 @@ class PubSub(object):
                 ),  # Keep connection for 2 hours when idle
             ]
 
-            channel = grpc.secure_channel(
+            self.channel = grpc.aio.secure_channel(
                 pubsub_url, secure_channel_credentials, options=channel_options
             )
-
-            # Add client trace ID interceptor
-            trace_interceptor = ClientTraceInterceptor(self.logger)
-            intercepted_channel = grpc.intercept_channel(channel, trace_interceptor)
-
-            self.channel = channel
-            self.stub = pb2_grpc.PubSubStub(intercepted_channel)
+            self.stub = pb2_grpc.PubSubStub(self.channel)
 
             # Re-authenticate to get fresh session token
-            self.authenticate()
+            await self.authenticate()
 
             self.logger.info("Successfully recreated gRPC channel and authenticated")
             return True
@@ -598,20 +511,20 @@ class PubSub(object):
             self.url = "{}://{}".format(url_parts.scheme, url_parts.netloc)
             self.session_id = res_xml[4].text
         except IndexError:
-            self.logger.error(
-                "An exception occurred. Check the response XML: %s", res.__dict__
-            )
+            self.logger.error("An exception occurred. Check the response XML: %s", res.__dict__)
 
         # Get org ID from UserInfo
         uinfo = res_xml[6]
         # Org ID
         self.tenant_id = uinfo[8].text
 
-        # Set metadata headers per Salesforce documentation
+        # Set metadata headers per Salesforce documentation (trace id replaces the
+        # removed sync gRPC interceptor).
         self.metadata = (
             ("accesstoken", self.session_id),
             ("instanceurl", self.url),
             ("tenantid", self.tenant_id),
+            ("x-client-trace-id", str(uuid.uuid4())),
         )
 
         # Validate header formats per Salesforce requirements
@@ -662,11 +575,13 @@ class PubSub(object):
             # OAuth tokens don't include org ID in response, need to fetch separately
             self.tenant_id = self._fetch_org_id()
 
-            # Set metadata headers same format as SOAP
+            # Set metadata headers same format as SOAP (trace id replaces the removed
+            # sync gRPC interceptor).
             self.metadata = (
                 ("accesstoken", self.session_id),
                 ("instanceurl", self.url),
                 ("tenantid", self.tenant_id),
+                ("x-client-trace-id", str(uuid.uuid4())),
             )
 
             self._validate_auth_headers()
@@ -701,7 +616,7 @@ class PubSub(object):
 
             headers = {
                 "Authorization": f"Bearer {self.session_id}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
 
             response = requests.get(identity_url, headers=headers, timeout=30)
@@ -720,7 +635,16 @@ class PubSub(object):
             self.logger.error(f"Failed to fetch organization ID: {e}")
             raise Exception(f"Could not retrieve organization ID: {e}")
 
-    def authenticate(self):
+    async def authenticate(self):
+        """
+        Authenticate with Salesforce (async wrapper).
+
+        The underlying auth methods use the blocking `requests` library, so they run in
+        a worker thread to avoid stalling the event loop (and the FetchRequest cadence).
+        """
+        await asyncio.to_thread(self._authenticate_sync)
+
+    def _authenticate_sync(self):
         """
         Authenticate with Salesforce using available credentials.
 
@@ -745,32 +669,6 @@ class PubSub(object):
                 "Provide either (client_id, client_secret) for OAuth "
                 "or (username, password) for SOAP login."
             )
-
-    def release_subscription_semaphore(self):
-        """
-        Release semaphore so FetchRequest can be sent.
-        Uses flow controller if available for enhanced safety.
-        """
-        if self.flow_controller:
-            success = self.flow_controller.release()
-            if success:
-                self.logger.debug(
-                    "Flow controller released semaphore successfully - ready for next fetch"
-                )
-            else:
-                self.logger.warning("Flow controller failed to release semaphore")
-        else:
-            try:
-                self.semaphore.release()
-                self.logger.debug(
-                    "Semaphore released successfully - ready for next fetch"
-                )
-            except ValueError as e:
-                self.logger.warning(
-                    "Attempted to release semaphore beyond maximum value: %s", e
-                )
-            except Exception as e:
-                self.logger.error("Error releasing semaphore: %s", e)
 
     def make_fetch_request(self, topic, replay_type, replay_id, num_requested):
         """
@@ -802,98 +700,6 @@ class PubSub(object):
             num_requested=num_requested,
         )
 
-    def fetch_req_stream(self, topic, replay_type, replay_id, num_requested):
-        """
-        Returns a FetchRequest stream for the Subscribe RPC.
-        Implements Salesforce flow control requirements: new FetchRequest within 60 seconds.
-        """
-        consecutive_timeouts = 0
-        max_consecutive_timeouts = 3
-        last_response_time = time.time()
-
-        while True:
-            # Salesforce requirement: send new FetchRequest within 60 seconds of last response
-            time_since_last_response = time.time() - last_response_time
-
-            # Only send FetchRequest when needed. Semaphore release indicates need for new FetchRequest
-            # Use flow controller if available, otherwise fall back to basic semaphore
-            if self.flow_controller:
-                acquired = self.flow_controller.acquire(timeout=self.timeout_seconds)
-            else:
-                acquired = self.semaphore.acquire(timeout=self.timeout_seconds)
-
-            if not acquired:
-                consecutive_timeouts += 1
-
-                # Recalculate time since last response AFTER the blocking acquire
-                # The value from line 809 is stale (calculated before the timeout wait)
-                time_since_last_response = time.time() - last_response_time
-
-                # Check if we're approaching Salesforce's 60-second limit
-                if time_since_last_response >= self.timeout_seconds:
-                    self.logger.debug(
-                        "Approaching Salesforce 60-second limit (%.1fs). Sending compliance FetchRequest.",
-                        time_since_last_response,
-                    )
-                    # Force a FetchRequest to maintain compliance
-                    consecutive_timeouts = 0
-                    last_response_time = time.time()
-                    self.logger.debug(
-                        "Sending compliance FetchRequest for %d events",
-                        num_requested,
-                    )
-                    yield self.make_fetch_request(
-                        topic, replay_type, replay_id, num_requested
-                    )
-                    continue
-
-                # Only warn if we have multiple consecutive timeouts (indicating real issues)
-                if consecutive_timeouts >= 2:
-                    self.logger.warning(
-                        "Multiple semaphore timeouts (#%d). Stream may be experiencing issues. Time since last response: %.1fs",
-                        consecutive_timeouts,
-                        time_since_last_response,
-                    )
-                else:
-                    self.logger.debug(
-                        "Semaphore acquire timeout #%d (normal for idle streams). Time since last response: %.1fs",
-                        consecutive_timeouts,
-                        time_since_last_response,
-                    )
-
-                if consecutive_timeouts >= max_consecutive_timeouts:
-                    self.logger.error(
-                        "%d consecutive timeouts. Stream appears to be deadlocked.",
-                        max_consecutive_timeouts,
-                    )
-                    # Force release to attempt recovery
-                    try:
-                        if self.flow_controller:
-                            self.flow_controller.release()
-                        else:
-                            self.semaphore.release()
-                        self.logger.info("Attempted recovery by releasing semaphore")
-                        consecutive_timeouts = 0
-                    except ValueError:
-                        self.logger.error(
-                            "Recovery failed: semaphore was already at maximum value"
-                        )
-                        break
-
-                # Continue loop to retry
-                continue
-            else:
-                # Successfully acquired semaphore
-                consecutive_timeouts = 0
-                last_response_time = time.time()
-                self.logger.debug(
-                    "Semaphore acquired successfully. Sending Fetch Request for %d events",
-                    num_requested,
-                )
-                yield self.make_fetch_request(
-                    topic, replay_type, replay_id, num_requested
-                )
-
     def decode(self, schema, payload):
         """
         Uses Avro and the event schema to decode a serialized payload.
@@ -905,32 +711,37 @@ class PubSub(object):
         ret = reader.read(decoder)
         return ret
 
-    def get_topic(self, topic_name):
-        return self.stub.GetTopic(
+    async def get_topic(self, topic_name):
+        return await self.stub.GetTopic(
             pb2.TopicRequest(topic_name=topic_name), metadata=self.metadata
         )
 
-    def get_schema_json(self, schema_id):
+    async def get_schema_json(self, schema_id):
         """
         Uses GetSchema RPC to retrieve schema given a schema ID.
         """
         # If the schema is not found in the dictionary, get the schema and store it in the dictionary
-        if (
-            schema_id not in self.json_schema_dict
-            or self.json_schema_dict[schema_id] is None
-        ):
-            res = self.stub.GetSchema(
+        if schema_id not in self.json_schema_dict or self.json_schema_dict[schema_id] is None:
+            res = await self.stub.GetSchema(
                 pb2.SchemaRequest(schema_id=schema_id), metadata=self.metadata
             )
             self.json_schema_dict[schema_id] = res.schema_json
 
         return self.json_schema_dict[schema_id]
 
-    def subscribe(self, topic, replay_type, replay_id, num_requested, callback):
+    async def events(self, topic, replay_type, replay_id, num_requested):
         """
-        Calls the Subscribe RPC defined in the proto file and accepts a
-        client-defined callback to handle any events that are returned by the
-        API. Implements Salesforce-compliant retry logic with proper replay ID tracking.
+        Async generator over Salesforce Pub/Sub events for a subscription.
+
+        Yields individual ConsumerEvent objects (already deduplicated). Backpressure is
+        automatic: while the consumer is not pulling, this generator is suspended at the
+        ``yield`` and stops sending FetchRequests, so Salesforce throttles delivery.
+
+        Implements Salesforce-compliant retry with replay-ID tracking, token refresh, and
+        channel recreation. The initial replay position is provided by the caller (derived
+        from the durable checkpoint on restart); mid-stream reconnects resume from the last
+        received replay id — in-flight events remain safely buffered downstream, so this is
+        at-least-once with no gap.
         """
         attempt = 0
         consecutive_failures = 0
@@ -945,117 +756,97 @@ class PubSub(object):
 
         while attempt <= self.max_retries:
             try:
-                self.logger.info(
-                    f"Starting subscription to {topic} (attempt {attempt + 1})"
-                )
-                # Display replay ID properly for logging
                 replay_id_display = (
                     current_replay_id.hex()
                     if isinstance(current_replay_id, bytes)
                     else current_replay_id
                 )
                 self.logger.info(
-                    f"Using replay strategy: {current_replay_type}, replay_id: {replay_id_display}"
+                    f"Starting subscription to {topic} (attempt {attempt + 1}); "
+                    f"strategy={current_replay_type}, replay_id={replay_id_display}"
                 )
 
-                # Create enhanced callback that tracks replay IDs and implements deduplication
-                def replay_tracking_callback(event, client):
-                    nonlocal last_processed_replay_id
-                    try:
-                        # Track latest replay ID from the response (store as bytes per Salesforce docs)
-                        if (
-                            hasattr(event, "latest_replay_id")
-                            and event.latest_replay_id
-                        ):
-                            last_processed_replay_id = (
-                                event.latest_replay_id
-                            )  # Keep as bytes
-                            self.logger.debug(
-                                f"Updated last processed replay ID: {event.latest_replay_id.hex()}"
-                            )
-
-                        # Process individual events with deduplication and replay ID tracking
-                        if hasattr(event, "events") and event.events:
-                            deduplicated_events = []
-                            for individual_event in event.events:
-                                # Check for duplicate using system-generated ID
-                                event_id = getattr(individual_event.event, "id", None)
-                                if event_id:
-                                    if self._is_event_duplicate(event_id):
-                                        self.logger.debug(
-                                            f"Skipping duplicate event: {event_id}"
-                                        )
-                                        continue
-                                    else:
-                                        self._mark_event_processed(event_id)
-                                        deduplicated_events.append(individual_event)
-                                else:
-                                    # No event ID available, process anyway but log warning
-                                    self.logger.warning(
-                                        "Event missing system-generated ID, cannot deduplicate"
-                                    )
-                                    deduplicated_events.append(individual_event)
-
-                                # Track replay ID for last processed event (store as bytes per Salesforce docs)
-                                if (
-                                    hasattr(individual_event, "replay_id")
-                                    and individual_event.replay_id
-                                ):
-                                    last_processed_replay_id = (
-                                        individual_event.replay_id
-                                    )  # Keep as bytes
-                                    self.logger.debug(
-                                        f"Processing event with replay ID: {individual_event.replay_id.hex()}"
-                                    )
-
-                            # Create a new event object with deduplicated events for the callback
-                            if deduplicated_events:
-                                # Create a copy of the event with only non-duplicate events
-                                deduplicated_event = type(event)(
-                                    events=deduplicated_events,
-                                    latest_replay_id=event.latest_replay_id,
-                                    rpc_id=getattr(event, "rpc_id", ""),
-                                    pending_num_requested=getattr(
-                                        event, "pending_num_requested", 0
-                                    ),
-                                )
-                                callback(deduplicated_event, client)
-                            elif event.events:
-                                self.logger.info(
-                                    f"All {len(event.events)} events in batch were duplicates, skipping callback"
-                                )
-                            else:
-                                # No events in batch (keepalive), call callback anyway
-                                callback(event, client)
-                        else:
-                            # No events in response (keepalive message)
-                            callback(event, client)
-
-                    except Exception as callback_error:
-                        self.logger.error(f"Error in event callback: {callback_error}")
-                        # Don't re-raise callback errors to avoid breaking the stream
-
-                sub_stream = self.stub.Subscribe(
-                    self.fetch_req_stream(
+                # Open a bidirectional stream and prime it with the initial FetchRequest.
+                call = self.stub.Subscribe(metadata=self.metadata)
+                await call.write(
+                    self.make_fetch_request(
                         topic, current_replay_type, current_replay_id, num_requested
-                    ),
-                    metadata=self.metadata,
+                    )
                 )
-
                 self.logger.info(f"Successfully subscribed to {topic}")
-                consecutive_failures = (
-                    0  # Reset failure counter on successful connection
-                )
+                consecutive_failures = 0
 
-                # Process events from the stream
-                for event in sub_stream:
-                    replay_tracking_callback(event, self)
+                # Read responses. We wait on each read with a timeout so we can send a
+                # periodic keepalive FetchRequest during idle periods, but we must NOT
+                # cancel the in-flight read — cancelling call.read() finishes the RPC.
+                # So the pending read task is preserved across idle timeouts and the
+                # keepalive is written concurrently (read and write are independent
+                # directions of the bidi stream).
+                read_task = None
+                try:
+                    while True:
+                        if read_task is None:
+                            read_task = asyncio.ensure_future(call.read())
+                        done, _ = await asyncio.wait({read_task}, timeout=self.timeout_seconds)
+                        if not done:
+                            self.logger.debug(
+                                "Idle %.0fs; sending keepalive FetchRequest",
+                                self.timeout_seconds,
+                            )
+                            await call.write(
+                                self.make_fetch_request(
+                                    topic,
+                                    current_replay_type,
+                                    current_replay_id,
+                                    num_requested,
+                                )
+                            )
+                            continue
 
-                # If we reach here, the stream ended normally
-                self.logger.warning(f"Subscription stream to {topic} ended normally")
-                break
+                        response = read_task.result()  # may raise AioRpcError
+                        read_task = None
 
-            except grpc.RpcError as e:
+                        if response == grpc.aio.EOF:
+                            self.logger.warning(f"Subscription stream to {topic} ended normally")
+                            return
+
+                        # Track the latest replay id advertised by the server (bytes).
+                        if getattr(response, "latest_replay_id", None):
+                            last_processed_replay_id = response.latest_replay_id
+
+                        for individual_event in response.events:
+                            event_id = getattr(individual_event.event, "id", None)
+                            if event_id and self._is_event_duplicate(event_id):
+                                self.logger.debug(f"Skipping duplicate event: {event_id}")
+                                continue
+                            if event_id:
+                                self._mark_event_processed(event_id)
+                            else:
+                                self.logger.warning(
+                                    "Event missing system-generated ID, cannot deduplicate"
+                                )
+                            if getattr(individual_event, "replay_id", None):
+                                last_processed_replay_id = individual_event.replay_id
+                            # Backpressure point: suspends here until the consumer pulls.
+                            yield individual_event
+
+                        # Top up credit once the server has exhausted what it will send.
+                        if getattr(response, "pending_num_requested", 0) == 0:
+                            await call.write(
+                                self.make_fetch_request(
+                                    topic,
+                                    current_replay_type,
+                                    current_replay_id,
+                                    num_requested,
+                                )
+                            )
+                finally:
+                    if read_task is not None:
+                        read_task.cancel()
+                        with contextlib.suppress(BaseException):
+                            await read_task
+
+            except grpc.aio.AioRpcError as e:
                 consecutive_failures += 1
                 self._log_grpc_error(e, f"during subscription to {topic}")
 
@@ -1072,7 +863,6 @@ class PubSub(object):
                     raise
 
                 current_replay_type, current_replay_id = retry_strategy
-                # Display replay ID properly for logging
                 replay_id_display = (
                     current_replay_id.hex()
                     if isinstance(current_replay_id, bytes)
@@ -1086,20 +876,19 @@ class PubSub(object):
                 if e.code() == grpc.StatusCode.UNAUTHENTICATED:
                     self.logger.info("Authentication token expired, refreshing...")
                     try:
-                        self.authenticate()  # Re-authenticate
+                        await self.authenticate()
                         self.logger.info("Authentication refreshed successfully")
                     except Exception as auth_error:
-                        self.logger.error(
-                            f"Failed to refresh authentication: {auth_error}"
-                        )
+                        self.logger.error(f"Failed to refresh authentication: {auth_error}")
                         consecutive_failures += 1
 
-                # Check if we've had too many consecutive failures
+                # Recreate the channel after too many consecutive failures
                 if consecutive_failures >= max_consecutive_failures:
                     self.logger.error(
-                        f"Too many consecutive failures ({consecutive_failures}), attempting channel recreation"
+                        f"Too many consecutive failures ({consecutive_failures}), "
+                        f"attempting channel recreation"
                     )
-                    if not self._recreate_channel_and_stub():
+                    if not await self._recreate_channel_and_stub():
                         self.logger.error("Failed to recreate channel, giving up")
                         raise
                     consecutive_failures = 0
@@ -1111,14 +900,14 @@ class PubSub(object):
             # Calculate retry delay and wait (only if we haven't exceeded max retries)
             if attempt < self.max_retries:
                 retry_delay = self._get_retry_delay(attempt)
-                self.logger.info(
-                    f"Retrying subscription in {retry_delay:.2f} seconds..."
-                )
-                time.sleep(retry_delay)
+                self.logger.info(f"Retrying subscription in {retry_delay:.2f} seconds...")
+                await asyncio.sleep(retry_delay)
 
             attempt += 1
 
-        if attempt > self.max_retries:
-            error_msg = f"Failed to establish stable subscription to {topic} after {self.max_retries} retries"
-            self.logger.error(error_msg)
-            raise Exception(error_msg)
+        error_msg = (
+            f"Failed to establish stable subscription to {topic} "
+            f"after {self.max_retries} retries"
+        )
+        self.logger.error(error_msg)
+        raise Exception(error_msg)

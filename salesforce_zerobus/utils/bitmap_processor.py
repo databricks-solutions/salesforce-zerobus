@@ -1,7 +1,7 @@
 """
 ChangeEventHeaderUtility.py
 
-This class provides the utility method to decode the bitmap fields (eg: changedFields)  and return the avro schema field values represented by the bitmap. 
+This class provides the utility method to decode the bitmap fields (eg: changedFields)  and return the avro schema field values represented by the bitmap.
 To understand the process of bitmap conversion, see "Event Deserialization Considerations" in the Pub/Sub API documentation at https://developer.salesforce.com/docs/platform/pub-sub-api/guide/event-deserialization-considerations.html.
 """
 
@@ -10,7 +10,7 @@ from bitstring import BitArray
 
 
 def process_bitmap(avro_schema: Schema, bitmap_fields: list):
-    fields =  []
+    fields = []
     if len(bitmap_fields) != 0:
         # replace top field level bitmap with list of fields
         if bitmap_fields[0].startswith("0x"):
@@ -26,11 +26,13 @@ def process_bitmap(avro_schema: Schema, bitmap_fields: list):
                     parent_field = avro_schema.fields[int(bitmap_strings[0])]
                     child_schema = get_value_schema(parent_field.type)
                     # make sure we're really dealing with compound field
-                    if child_schema.type is not None and child_schema.type == 'record':
+                    if child_schema.type is not None and child_schema.type == "record":
                         nested_size = len(child_schema.fields)
                         parent_field_name = parent_field.name
                         # interpret the child field names from mapping of parentFieldPos -> childFieldbitMap
-                        full_field_names = get_fieldnames_from_bitstring(bitmap_strings[1], child_schema)
+                        full_field_names = get_fieldnames_from_bitstring(
+                            bitmap_strings[1], child_schema
+                        )
                         full_field_names = append_parent_name(parent_field_name, full_field_names)
                         if len(full_field_names) > 0:
                             # when all nested fields under a compound got nulled out at once by customer, we recognize the top level field instead of trying to list every single nested field
@@ -54,7 +56,7 @@ def get_fieldnames_from_bitstring(bitmap, avro_schema: Schema):
     bitmap_field_name = []
     fields_list = list(avro_schema.fields)
     binary_string = convert_hexbinary_to_bitset(bitmap)
-    indexes = find('1', binary_string)
+    indexes = find("1", binary_string)
     for index in indexes:
         bitmap_field_name.append(fields_list[index].name)
     return bitmap_field_name
@@ -62,13 +64,13 @@ def get_fieldnames_from_bitstring(bitmap, avro_schema: Schema):
 
 # Get the value type of an "optional" schema, which is a union of [null, valueSchema]
 def get_value_schema(parent_field):
-    if parent_field.type == 'union':
+    if parent_field.type == "union":
         schemas = parent_field.schemas
-        if len(schemas) == 2 and schemas[0].type == 'null':
+        if len(schemas) == 2 and schemas[0].type == "null":
             return schemas[1]
-        if len(schemas) == 2 and schemas[0].type == 'string':
+        if len(schemas) == 2 and schemas[0].type == "string":
             return schemas[1]
-        if len(schemas) == 3 and schemas[0].type == 'null' and schemas[1].type == 'string':
+        if len(schemas) == 3 and schemas[0].type == "null" and schemas[1].type == "string":
             return schemas[2]
     return parent_field
 

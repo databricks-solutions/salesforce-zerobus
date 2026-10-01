@@ -32,6 +32,13 @@ streamer = SalesforceZerobus(
         "ingest_endpoint": os.getenv("DATABRICKS_INGEST_ENDPOINT"),
         "sql_endpoint": os.getenv("DATABRICKS_SQL_ENDPOINT"),
     },
+    # Durability vs. latency:
+    #   True  (default) — block each batch until Zerobus durably acks it. Strongest
+    #                     guarantee, but adds the server's per-batch commit latency.
+    #   False           — fire-and-forget: submit and move on for lower latency / higher
+    #                     throughput. Still at-least-once (SDK background sender + flush on
+    #                     shutdown + resume from the table's last replay id on restart).
+    wait_for_durability=True,
 )
 
 print("Starting Salesforce to Databricks streaming...")

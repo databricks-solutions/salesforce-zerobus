@@ -4,17 +4,21 @@ Salesforce Change Data Capture events to Databricks Delta tables.
 """
 
 import asyncio
+import contextlib
 import logging
-import threading
-import time
-from queue import Queue
+import signal
 from typing import Any, Dict, Optional
 
 import avro.schema
+from zerobus.sdk.shared import ZerobusException
 
 from .databricks import DatabricksForwarder, DatabricksReplayManager
 from .pubsub import PubSub
-from .utils import FlowController, process_bitmap
+from .utils import process_bitmap
+
+# Sentinel pushed onto the internal queue to tell the consumer the producer has stopped
+# and it should drain any remaining records and exit.
+_SHUTDOWN_SENTINEL = object()
 
 
 class SalesforceZerobus:
@@ -83,6 +87,12 @@ class SalesforceZerobus:
         zerobus_recovery_backoff_ms: int = 5000,
         zerobus_server_ack_timeout_ms: int = 60000,
         zerobus_flush_timeout_ms: int = 300000,
+        # Async pipeline tuning
+        queue_maxsize: int = 2000,
+        ingest_batch_size: int = 100,
+        flush_interval_seconds: float = 5.0,
+        max_batch_retries: int = 10,
+        wait_for_durability: bool = True,
         # Backward compatibility
         sf_object: Optional[str] = None,
     ):
@@ -96,7 +106,8 @@ class SalesforceZerobus:
             databricks_auth: Dict with keys: workspace_url, client_id, client_secret, ingest_endpoint
             batch_size: Number of events to fetch per request (default: 10)
             enable_replay_recovery: Enable zero-data-loss replay recovery (default: True)
-            timeout_seconds: Timeout for semaphore operations (default: 300.0)
+            timeout_seconds: Idle read timeout; a keepalive FetchRequest is sent to
+                Salesforce after this many seconds of no response (default: 50.0)
             max_timeouts: Max consecutive timeouts before recovery (default: 3)
             grpc_host: Salesforce gRPC host (default: api.pubsub.salesforce.com)
             grpc_port: Salesforce gRPC port (default: 7443)
@@ -109,6 +120,15 @@ class SalesforceZerobus:
             zerobus_recovery_backoff_ms: Zerobus recovery backoff between attempts in ms (default: 5000)
             zerobus_server_ack_timeout_ms: Zerobus server unresponsive timeout in ms (default: 60000)
             zerobus_flush_timeout_ms: Zerobus stream flush timeout in ms (default: 300000)
+            queue_maxsize: Max buffered events between the Salesforce reader and the
+                Databricks writer; when full it applies backpressure to Salesforce (default: 2000)
+            ingest_batch_size: Max events written to Zerobus per batch (default: 100)
+            flush_interval_seconds: Max time a partial batch waits before being written (default: 5.0)
+            max_batch_retries: Attempts per batch before failing loudly (default: 10)
+            wait_for_durability: If True (default), block each batch until Zerobus durably
+                acks before advancing (strongest guarantee, adds commit latency). If False,
+                fire-and-forget for lower latency/higher throughput — still at-least-once via
+                the SDK background sender, flush-on-shutdown, and table-based restart recovery.
             sf_object: [DEPRECATED] Use sf_object_channel instead
         """
         # Handle backward compatibility and new parameter
@@ -128,14 +148,10 @@ class SalesforceZerobus:
             else:
                 self.sf_object = sf_object_channel
         else:
-            raise ValueError(
-                "Either sf_object_channel or sf_object parameter is required"
-            )
+            raise ValueError("Either sf_object_channel or sf_object parameter is required")
 
         # Validate required parameters
-        self._validate_config(
-            sf_object_channel, databricks_table, salesforce_auth, databricks_auth
-        )
+        self._validate_config(sf_object_channel, databricks_table, salesforce_auth, databricks_auth)
 
         # Store configuration
         self.sf_object_channel = sf_object_channel
@@ -152,6 +168,16 @@ class SalesforceZerobus:
         self.auto_create_table = auto_create_table
         self.backfill_historical = backfill_historical
 
+        # Async pipeline tuning
+        self.queue_maxsize = queue_maxsize
+        self.ingest_batch_size = ingest_batch_size
+        self.flush_interval_seconds = flush_interval_seconds
+        self.max_batch_retries = max_batch_retries
+        # True  -> block each batch until Zerobus durably acks (strongest guarantee).
+        # False -> fire-and-forget (lower latency/higher throughput; still at-least-once
+        #          via the SDK background sender + flush-on-shutdown + table recovery).
+        self.wait_for_durability = wait_for_durability
+
         # Store Zerobus SDK recovery configuration
         self.zerobus_config = {
             "max_inflight_records": zerobus_max_inflight_records,
@@ -167,21 +193,18 @@ class SalesforceZerobus:
 
         # Runtime state
         self.running = False
-        self.event_queue = Queue()
         self.org_id = None
+        self._stopping = False
+        self._queue = None
+        self._producer_task = None
+        # Last replay id whose batch has been durably written to Delta. Advanced only
+        # after Zerobus acks, so it is a safe resume point for at-least-once delivery.
+        self._last_durable_replay_id = None
 
         # Components (lazy initialized)
         self._pubsub_client = None
         self._databricks_forwarder = None
         self._replay_manager = None
-        self._flow_controller = None
-        self._background_tasks = []
-
-        # Synchronization for the background Databricks init (table creation + replay
-        # resolution). The subscription must wait for this and reuse its replay
-        # decision; re-deriving it separately races table creation (see start()).
-        self._init_complete = threading.Event()
-        self._init_replay_params = None
 
         # Setup logging
         self.logger = logging.getLogger(f"{__name__}.{sf_object}")
@@ -215,9 +238,7 @@ class SalesforceZerobus:
             and salesforce_auth.get("password")
         )
 
-        has_instance = (
-            "instance_url" in salesforce_auth and salesforce_auth.get("instance_url")
-        )
+        has_instance = "instance_url" in salesforce_auth and salesforce_auth.get("instance_url")
 
         if not has_instance:
             raise ValueError("salesforce_auth must include 'instance_url'")
@@ -238,9 +259,7 @@ class SalesforceZerobus:
             "sql_endpoint",
         ]
         missing_db = [
-            k
-            for k in required_db_keys
-            if k not in databricks_auth or not databricks_auth[k]
+            k for k in required_db_keys if k not in databricks_auth or not databricks_auth[k]
         ]
         if missing_db:
             raise ValueError(f"Missing required Databricks auth keys: {missing_db}")
@@ -248,14 +267,6 @@ class SalesforceZerobus:
     def _initialize_components(self):
         """Initialize all components for streaming."""
         self.logger.info(f"Initializing components for {self.sf_object} streaming")
-
-        # Initialize flow controller
-        self._flow_controller = FlowController(
-            semaphore_count=1,
-            acquire_timeout=self.timeout_seconds,
-            max_consecutive_timeouts=self.max_timeouts,
-            logger=self.logger,
-        )
 
         # Initialize PubSub client
         pubsub_args = {
@@ -279,7 +290,6 @@ class SalesforceZerobus:
             pubsub_args["password"] = self.salesforce_auth["password"]
 
         self._pubsub_client = PubSub(pubsub_args)
-        self._pubsub_client.set_flow_controller(self._flow_controller)
 
         # Initialize Databricks forwarder with Zerobus recovery configuration
         self._databricks_forwarder = DatabricksForwarder(
@@ -302,9 +312,7 @@ class SalesforceZerobus:
                     client_secret=self.databricks_auth["client_secret"],
                     sql_endpoint=self.databricks_auth["sql_endpoint"],
                 )
-                self.logger.info(
-                    "Replay recovery enabled - will resume from last position"
-                )
+                self.logger.info("Replay recovery enabled - will resume from last position")
             except Exception as e:
                 self.logger.warning(f"Failed to initialize replay manager: {e}")
                 self._replay_manager = None
@@ -313,56 +321,27 @@ class SalesforceZerobus:
 
         self.logger.info("Components initialized successfully")
 
-    async def _initialize_databricks_async(self):
-        """Initialize Databricks components for async operation."""
+    def _resolve_replay_params(self):
+        """Resolve the subscription replay position (blocking; call via asyncio.to_thread).
+
+        Creates the target table if needed and derives the replay decision in a single
+        sequential step, replacing the old thread + threading.Event choreography that
+        raced table creation and could silently fall back to LATEST (skipping backfill).
+        """
+        if not self._replay_manager:
+            self.logger.info("Replay recovery disabled - starting from LATEST")
+            return ("LATEST", "")
+
         try:
-            # First, ensure table exists and get subscription params (triggers table creation if needed)
-            if self._replay_manager:
-                # This call will create the table if it doesn't exist
-                replay_type, replay_id = self._replay_manager.get_subscription_params(
-                    auto_create_table=self.auto_create_table,
-                    backfill_historical=self.backfill_historical,
-                )
-                # Cache the resolved decision so the subscription reuses it rather than
-                # re-deriving with auto_create_table=False (which races table creation
-                # and can wrongly fall back to LATEST, skipping the backfill).
-                self._init_replay_params = (replay_type, replay_id)
-                self.logger.debug(
-                    f"Table initialization complete, replay mode: {replay_type}"
-                )
-
-                # Initialize replay recovery (pre-fetch replay_id to avoid blocking later)
-                self._replay_manager.initialize_replay_recovery()
-
-            # Now initialize the stream (table should exist at this point)
-            if self._databricks_forwarder:
-                await self._databricks_forwarder.initialize_stream()
-                self.logger.info("Databricks stream initialized")
-        finally:
-            # Always signal completion so a waiting start() never blocks forever,
-            # even if initialization raised partway through.
-            self._init_complete.set()
-
-    def _get_subscription_params(self):
-        """Get replay parameters for the subscription.
-
-        Prefers the decision already computed by _initialize_databricks_async, which
-        owns table creation and may select EARLIEST/CUSTOM. Only re-derives here (with
-        auto_create_table=False) if that init step produced no result, since re-deriving
-        races table creation and can wrongly fall back to LATEST."""
-        if self._init_replay_params is not None:
-            replay_type, replay_id = self._init_replay_params
-        elif self._replay_manager:
-            try:
-                replay_type, replay_id = self._replay_manager.get_subscription_params(
-                    auto_create_table=False,  # init path owns table creation
-                    backfill_historical=self.backfill_historical,
-                )
-            except Exception as e:
-                self.logger.warning(f"Replay manager failed, using LATEST: {e}")
-                replay_type, replay_id = "LATEST", ""
-        else:
-            replay_type, replay_id = "LATEST", ""
+            replay_type, replay_id = self._replay_manager.get_subscription_params(
+                auto_create_table=self.auto_create_table,
+                backfill_historical=self.backfill_historical,
+            )
+            # Pre-fetch/cache the replay id so we don't re-query later.
+            self._replay_manager.initialize_replay_recovery()
+        except Exception as e:
+            self.logger.warning(f"Replay manager failed, using LATEST: {e}")
+            return ("LATEST", "")
 
         if replay_type == "CUSTOM":
             self.logger.info(f"Resuming from replay_id: {replay_id}")
@@ -372,475 +351,325 @@ class SalesforceZerobus:
             self.logger.info("Starting fresh subscription from LATEST")
         return replay_type, replay_id
 
-    def _salesforce_event_callback(self, event, pubsub):
-        """Callback for processing Salesforce events."""
+    def _convert_bitmap(self, parsed_schema, header, field_key):
+        """Convert a single CDC bitmap field to readable names (empty list on failure)."""
+        raw = header.get(field_key, [])
+        if not raw or not parsed_schema:
+            return []
         try:
-            if event.events:
-                # Store org_id from first successful connection
-                if not self.org_id:
-                    self.org_id = pubsub.tenant_id
-
-                # Process each event
-                for evt in event.events:
-                    try:
-                        # Decode event
-                        payload_bytes = evt.event.payload
-                        schema_id = evt.event.schema_id
-                        json_schema = pubsub.get_schema_json(schema_id)
-                        decoded_event = pubsub.decode(json_schema, payload_bytes)
-
-                        # Add metadata
-                        decoded_event["event_id"] = evt.event.id
-                        decoded_event["schema_id"] = schema_id
-                        decoded_event["replay_id"] = evt.replay_id.hex()
-
-                        # Process CDC bitmap fields
-                        if "ChangeEventHeader" in decoded_event:
-                            header = decoded_event["ChangeEventHeader"]
-
-                            # Parse schema once for all bitmap processing
-                            try:
-                                parsed_schema = avro.schema.parse(json_schema)
-                            except Exception as e:
-                                self.logger.warning(
-                                    f"Could not parse Avro schema for bitmap processing: {e}"
-                                )
-                                parsed_schema = None
-
-                            # Convert changedFields bitmap to readable names
-                            changed_fields = header.get("changedFields", [])
-                            if changed_fields and parsed_schema:
-                                try:
-                                    converted_fields = process_bitmap(
-                                        parsed_schema, changed_fields
-                                    )
-                                    decoded_event["converted_changed_fields"] = (
-                                        converted_fields
-                                    )
-                                except Exception as e:
-                                    self.logger.warning(
-                                        f"Could not convert changedFields bitmap: {e}"
-                                    )
-                                    decoded_event["converted_changed_fields"] = []
-                            else:
-                                decoded_event["converted_changed_fields"] = []
-
-                            # Convert nulledFields bitmap to readable names
-                            nulled_fields = header.get("nulledFields", [])
-                            if nulled_fields and parsed_schema:
-                                try:
-                                    converted_nulled_fields = process_bitmap(
-                                        parsed_schema, nulled_fields
-                                    )
-                                    decoded_event["converted_nulled_fields"] = (
-                                        converted_nulled_fields
-                                    )
-                                except Exception as e:
-                                    self.logger.warning(
-                                        f"Could not convert nulledFields bitmap: {e}"
-                                    )
-                                    decoded_event["converted_nulled_fields"] = []
-                            else:
-                                decoded_event["converted_nulled_fields"] = []
-
-                            # Convert diffFields bitmap to readable names
-                            diff_fields = header.get("diffFields", [])
-                            if diff_fields and parsed_schema:
-                                try:
-                                    converted_diff_fields = process_bitmap(
-                                        parsed_schema, diff_fields
-                                    )
-                                    decoded_event["converted_diff_fields"] = (
-                                        converted_diff_fields
-                                    )
-                                except Exception as e:
-                                    self.logger.warning(
-                                        f"Could not convert diffFields bitmap: {e}"
-                                    )
-                                    decoded_event["converted_diff_fields"] = []
-                            else:
-                                decoded_event["converted_diff_fields"] = []
-
-                            # Log received event
-                            entity_name = header.get("entityName", "Unknown")
-                            change_type = header.get("changeType", "Unknown")
-                            record_ids = header.get("recordIds", ["unknown"])
-                            record_id = record_ids[0] if record_ids else "unknown"
-
-                            self.logger.info(
-                                f"Received {entity_name} {change_type} {record_id}"
-                            )
-
-                        # Queue for async processing with binary payload and schema for Avro parsing
-                        event_package = {
-                            "decoded_event": decoded_event,
-                            "payload_binary": payload_bytes,
-                            "schema_json": json_schema,
-                        }
-                        self.event_queue.put(event_package)
-
-                    except Exception as e:
-                        self.logger.error(f"Salesforce event processing error: {e}")
-            else:
-                self.logger.debug("Keepalive message received")
-
+            return process_bitmap(parsed_schema, raw)
         except Exception as e:
-            self.logger.error(f"Critical error in event callback: {e}")
-        finally:
-            # Release semaphore for flow control
-            if event.events and event.pending_num_requested == 0:
-                if self._flow_controller.release():
-                    self.logger.debug("Released semaphore for batch completion")
-            elif not event.events:
-                if self._flow_controller.release():
-                    self.logger.debug("Released semaphore for keepalive")
+            self.logger.warning(f"Could not convert {field_key} bitmap: {e}")
+            return []
 
-    async def _process_event_queue(self):
-        """Process queued events and forward to Databricks."""
-        while self.running:
+    async def _decode_event(self, evt):
+        """Decode one Salesforce ConsumerEvent into a queue package.
+
+        Raises on Avro decode failure (a poison event) rather than silently dropping it,
+        so a schema problem is loud and never becomes a silent gap.
+        """
+        payload_bytes = evt.event.payload
+        schema_id = evt.event.schema_id
+        json_schema = await self._pubsub_client.get_schema_json(schema_id)
+        decoded_event = self._pubsub_client.decode(json_schema, payload_bytes)
+
+        # Add metadata (replay_id stored as fixed-position hex; see replay manager).
+        decoded_event["event_id"] = evt.event.id
+        decoded_event["schema_id"] = schema_id
+        decoded_event["replay_id"] = evt.replay_id.hex()
+
+        # Process CDC bitmap fields (best-effort; the raw payload is always preserved).
+        if "ChangeEventHeader" in decoded_event:
+            header = decoded_event["ChangeEventHeader"]
             try:
-                if not self.event_queue.empty():
-                    event_package = self.event_queue.get_nowait()
+                parsed_schema = avro.schema.parse(json_schema)
+            except Exception as e:
+                self.logger.warning(f"Could not parse Avro schema for bitmap processing: {e}")
+                parsed_schema = None
 
-                    try:
-                        # Forward event - Zerobus SDK handles recovery automatically
-                        await self._databricks_forwarder.forward_event(
-                            event_package["decoded_event"],
-                            self.org_id,
-                            event_package["payload_binary"],
-                            event_package["schema_json"],
-                        )
-                        self.event_queue.task_done()
+            decoded_event["converted_changed_fields"] = self._convert_bitmap(
+                parsed_schema, header, "changedFields"
+            )
+            decoded_event["converted_nulled_fields"] = self._convert_bitmap(
+                parsed_schema, header, "nulledFields"
+            )
+            decoded_event["converted_diff_fields"] = self._convert_bitmap(
+                parsed_schema, header, "diffFields"
+            )
 
-                    except Exception as e:
-                        # Log forwarding errors - most recovery is handled by Zerobus SDK
-                        self.logger.error(f"Failed to forward event to Databricks: {e}")
+            record_ids = header.get("recordIds", ["unknown"])
+            self.logger.info(
+                f"Received {header.get('entityName', 'Unknown')} "
+                f"{header.get('changeType', 'Unknown')} "
+                f"{record_ids[0] if record_ids else 'unknown'}"
+            )
 
-                        # Check for configuration-related errors that need attention
-                        error_str = str(e).lower()
-                        if any(keyword in error_str for keyword in ["permission", "authentication", "schema", "table"]):
-                            self.logger.warning(
-                                "Configuration-related error detected - may require manual intervention"
-                            )
+        return {
+            "decoded_event": decoded_event,
+            "payload_binary": payload_bytes,
+            "schema_json": json_schema,
+        }
 
-                        # Mark task done to prevent queue backup
-                        self.event_queue.task_done()
+    async def _produce(self, queue, replay_type, replay_id):
+        """Subscribe to Salesforce and feed decoded events into the bounded queue.
 
-                        # Brief pause to avoid tight error loops
-                        await asyncio.sleep(1)
+        ``queue.put`` blocks when the queue is full, which suspends this coroutine and,
+        via the events() async generator, stops sending FetchRequests — natural
+        backpressure onto Salesforce when Zerobus ingestion lags.
+        """
+        try:
+            async for evt in self._pubsub_client.events(
+                self.topic, replay_type, replay_id, self.batch_size
+            ):
+                if not self.org_id:
+                    self.org_id = self._pubsub_client.tenant_id
+                package = await self._decode_event(evt)
+                await queue.put(package)  # backpressure point
+        except asyncio.CancelledError:
+            self.logger.info("Producer cancelled (shutdown requested)")
+            raise
+        self.logger.warning("Salesforce event stream ended")
+
+    async def _consume(self, queue):
+        """Drain the queue, batch records, and ingest with a durability barrier.
+
+        Advances the durable checkpoint only after Zerobus acks, and never drops a batch
+        on failure (retries the same batch after recreating the stream). ``flush_interval``
+        bounds latency when traffic is sparse; ``ingest_batch_size`` bounds it under load.
+        """
+        batch = []
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=self.flush_interval_seconds)
+            except asyncio.TimeoutError:
+                # Idle flush: write whatever has accumulated so latency stays bounded.
+                if batch:
+                    await self._flush_batch(batch)
+                    batch = []
+                continue
+
+            if item is _SHUTDOWN_SENTINEL:
+                queue.task_done()
+                if batch:
+                    await self._flush_batch(batch)
+                    batch = []
+                self.logger.info("Consumer drained queue; stopping")
+                return
+
+            batch.append(item)
+            queue.task_done()
+            if len(batch) >= self.ingest_batch_size:
+                await self._flush_batch(batch)
+                batch = []
+
+    async def _flush_batch(self, batch):
+        """Ingest a batch, block until durable, then advance the checkpoint.
+
+        Retries the same batch (recreating the stream on ZerobusException) so nothing is
+        dropped. After ``max_batch_retries`` the error is raised, failing the service
+        loudly rather than skipping records — a crash resumes from the last durable
+        replay id (at-least-once), whereas a silent skip would be a permanent gap.
+        """
+        if not batch:
+            return
+
+        forwarder = self._databricks_forwarder
+        records = [
+            forwarder.build_record(
+                p["decoded_event"], self.org_id, p["payload_binary"], p["schema_json"]
+            )
+            for p in batch
+        ]
+
+        delay = 1
+        for attempt in range(1, self.max_batch_retries + 1):
+            try:
+                if self.wait_for_durability:
+                    # Durable: block until Zerobus acks the batch (strongest guarantee,
+                    # but adds the server's ~seconds commit latency per batch).
+                    offset = await forwarder.ingest_batch(records)
+                    await forwarder.wait_durable(offset)
                 else:
-                    await asyncio.sleep(0.1)
-
+                    # Fire-and-forget: submit and move on. The SDK's background sender
+                    # (recovery=True) writes to Delta, flush() on shutdown drains it, and
+                    # restart recovery reads the table's max replay id — so this stays
+                    # at-least-once, just without the per-batch durability wait.
+                    await forwarder.ingest_batch_nowait(records)
+                break
+            except ZerobusException as e:
+                self.logger.warning(
+                    f"Batch ingest failed (attempt {attempt}/{self.max_batch_retries}): "
+                    f"{e}. Recreating stream and retrying the same batch."
+                )
+                with contextlib.suppress(Exception):
+                    await forwarder.recreate()
             except Exception as e:
-                self.logger.error(f"Critical error in event queue processing: {e}")
-                await asyncio.sleep(1)
+                self.logger.error(
+                    f"Unexpected batch ingest error (attempt {attempt}/"
+                    f"{self.max_batch_retries}): {e}. Retrying the same batch."
+                )
+            if attempt >= self.max_batch_retries:
+                self.logger.error(
+                    "Exhausted batch retries; failing so the service restarts and "
+                    "resumes from the last durable replay id (no silent gap)."
+                )
+                raise
+            await asyncio.sleep(min(delay, 30))
+            delay *= 2
 
-    async def _health_monitor(self):
-        """Monitor health and log statistics for both recovery layers."""
-        last_report = time.time()
-        report_interval = 300  # 5 minutes
+        # FIFO queue + ordered batch ingest ⇒ the last event is the batch's max replay id.
+        self._last_durable_replay_id = batch[-1]["decoded_event"].get("replay_id")
+        verb = "Durably ingested" if self.wait_for_durability else "Submitted"
+        self.logger.info(
+            f"{verb} {len(records)} record(s) through replay " f"{self._last_durable_replay_id}"
+        )
 
-        while self.running:
-            try:
-                current_time = time.time()
-                if current_time - last_report >= report_interval:
-                    # Log Salesforce flow control health
-                    self._flow_controller.log_health_report()
+    def _request_stop(self):
+        """Signal-handler callback: begin graceful drain-and-flush shutdown."""
+        self.logger.info("Shutdown signal received; draining queue and flushing...")
+        self._stopping = True
+        if self._producer_task and not self._producer_task.done():
+            self._producer_task.cancel()
 
-                    # Check queue health
-                    queue_size = self.event_queue.qsize()
-                    if queue_size > 100:
-                        self.logger.warning(
-                            f"Event queue backing up: {queue_size} events"
-                        )
-                    elif queue_size > 0:
-                        self.logger.info(f"Queue status: {queue_size} events pending")
+    async def _run_pipeline(self, install_signals):
+        """Run the producer/consumer pipeline until shutdown, then flush and close."""
+        self.running = True
+        self._stopping = False
 
-                    # Check Zerobus stream health if available
-                    if self._databricks_forwarder:
-                        try:
-                            zerobus_health = self._databricks_forwarder.get_stream_health()
-                            # Only log if unhealthy or on debug level
-                            if not zerobus_health["healthy"]:
-                                self.logger.warning(
-                                    f"Zerobus stream unhealthy: {zerobus_health['status']}"
-                                )
+        if install_signals:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, self._request_stop)
+                except NotImplementedError:
+                    # add_signal_handler is POSIX-only; on Windows rely on KeyboardInterrupt.
+                    pass
 
-                                # Proactively recreate failed streams instead of waiting for next event
-                                if zerobus_health["status"] == "failed" and self._databricks_forwarder.stream:
-                                    self.logger.info("Proactively recreating failed Zerobus stream...")
-                                    try:
-                                        self._databricks_forwarder.stream = await self._databricks_forwarder.sdk.recreate_stream(
-                                            self._databricks_forwarder.stream
-                                        )
-                                        self.logger.info("Successfully recreated failed stream proactively")
-                                    except Exception as recreate_error:
-                                        self.logger.error(f"Failed to recreate stream proactively: {recreate_error}")
-                            else:
-                                self.logger.debug(
-                                    f"Zerobus stream healthy: {zerobus_health['status']}"
-                                )
-                        except Exception as e:
-                            self.logger.debug(f"Could not check Zerobus stream health: {e}")
+        try:
+            replay_type, replay_id = await asyncio.to_thread(self._resolve_replay_params)
+            await self._databricks_forwarder.initialize_stream()
+            if replay_type == "CUSTOM":
+                self._last_durable_replay_id = replay_id
 
-                    last_report = current_time
+            self.logger.info(
+                f"Starting subscription to {self.topic} "
+                f"(mode={replay_type}, fetch_size={self.batch_size}, "
+                f"ingest_batch={self.ingest_batch_size})"
+            )
 
-                await asyncio.sleep(30)  # Check every 30 seconds
+            queue = asyncio.Queue(maxsize=self.queue_maxsize)
+            self._queue = queue
+            producer = asyncio.create_task(self._produce(queue, replay_type, replay_id))
+            consumer = asyncio.create_task(self._consume(queue))
+            self._producer_task = producer
 
-            except Exception as e:
-                self.logger.error(f"Health monitor error: {e}")
-                await asyncio.sleep(60)
+            done, _pending = await asyncio.wait(
+                {producer, consumer}, return_when=asyncio.FIRST_COMPLETED
+            )
+            self._stopping = True
+
+            if consumer in done:
+                # Consumer exited first (fatal). Stop the producer and surface the error.
+                producer.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await producer
+                exc = consumer.exception()
+                if exc is not None:
+                    raise exc
+            else:
+                # Producer finished first (stream ended, fatal, or cancelled by signal).
+                # Tell the consumer to drain the remainder and flush before exiting.
+                await queue.put(_SHUTDOWN_SENTINEL)
+                await consumer
+                if not producer.cancelled():
+                    exc = producer.exception()
+                    if exc is not None:
+                        raise exc
+        finally:
+            self.running = False
+            await self._shutdown()
+
+    async def _shutdown(self):
+        """Flush and close the Zerobus stream and the Salesforce channel."""
+        if self._databricks_forwarder:
+            with contextlib.suppress(Exception):
+                await self._databricks_forwarder.flush()
+            with contextlib.suppress(Exception):
+                await self._databricks_forwarder.close()
+        channel = getattr(self._pubsub_client, "channel", None)
+        if channel is not None:
+            with contextlib.suppress(Exception):
+                await channel.close()
+        self.logger.info("Shutdown complete")
+
+    async def _run(self):
+        """Full lifecycle: init components, authenticate, run the pipeline."""
+        self._initialize_components()
+        self.logger.info("Authenticating with Salesforce...")
+        await self._pubsub_client.authenticate()
+        self.logger.info("Authentication successful!")
+        await self._run_pipeline(install_signals=True)
 
     def start(self):
         """
-        Start synchronous streaming (blocking).
-        This method will run until interrupted with Ctrl+C.
+        Start synchronous streaming (blocking) until interrupted (Ctrl+C / SIGTERM).
+
+        Thin wrapper over the single-loop async pipeline; kept for backward compatibility.
         """
         self.logger.info(f"Starting SalesforceZerobus streaming for {self.sf_object}")
-        self._initialize_components()
-        self.running = True
-
         try:
-            self.logger.info("Authenticating with Salesforce...")
-            self._pubsub_client.authenticate()
-            self.logger.info("Authentication successful!")
-            self.logger.info("Initializing Databricks connection...")
-            self.background_loop = asyncio.new_event_loop()
-
-            def run_async():
-                asyncio.set_event_loop(self.background_loop)
-                self.background_loop.run_until_complete(
-                    self._initialize_databricks_async()
-                )
-                self.background_loop.run_until_complete(self._run_background_tasks())
-
-            self.async_thread = threading.Thread(target=run_async, daemon=True)
-            self.async_thread.start()
-
-            # Wait for the background init (table creation + replay-mode resolution) to
-            # finish before resolving subscription params. A fixed sleep here used to
-            # race table creation: on a slow/cold warehouse the table didn't exist yet,
-            # so the subscription fell back to LATEST and silently skipped the backfill.
-            if not self._init_complete.wait(timeout=120):
-                self.logger.warning(
-                    "Databricks initialization did not complete within 120s; "
-                    "proceeding (subscription may fall back to LATEST)"
-                )
-            self.logger.info("Databricks connection initialized")
-
-            replay_type, replay_id = self._get_subscription_params()
-
-            self.logger.info(f"Starting subscription to {self.topic}")
-            self.logger.info(f"Batch size: {self.batch_size}, Mode: {replay_type}")
-
-            # Start streaming with robust error handling and retry logic
-            # The updated subscribe method now handles RST_STREAM and other gRPC errors automatically
-            self._pubsub_client.subscribe(
-                self.topic,
-                replay_type,
-                replay_id,
-                self.batch_size,
-                self._salesforce_event_callback,
-            )
-
+            asyncio.run(self._run())
         except KeyboardInterrupt:
-            self.logger.info("Shutting down gracefully...")
-        except Exception as e:
-            # Enhanced error logging with more context
-            import traceback
-
-            self.logger.error(f"Critical streaming error: {e}")
-            self.logger.error(f"Error type: {type(e).__name__}")
-            self.logger.error(f"Traceback: {traceback.format_exc()}")
-
-            # Check if this is a gRPC error and log additional details
-            if hasattr(e, "code") and hasattr(e, "details"):
-                self.logger.error(f"gRPC Status Code: {e.code()}")
-                self.logger.error(f"gRPC Details: {e.details()}")
-
-            # Re-raise to allow higher-level error handling
-            raise
-        finally:
-            self.running = False
-            self.logger.info("Cleaning up resources...")
-
-            # Close gRPC channel properly
-            if hasattr(self, "_pubsub_client") and hasattr(
-                self._pubsub_client, "channel"
-            ):
-                try:
-                    self._pubsub_client.channel.close()
-                    self.logger.info("gRPC channel closed successfully")
-                except Exception as e:
-                    self.logger.warning(f"Error closing gRPC channel: {e}")
-
-            # Stop background loop gracefully
-            if hasattr(self, "background_loop") and self.background_loop.is_running():
-                try:
-                    # Cancel background tasks first
-                    if hasattr(self, "_background_tasks"):
-                        for task in self._background_tasks:
-                            self.background_loop.call_soon_threadsafe(task.cancel)
-
-                    # Give tasks time to complete cancellation
-                    import time
-                    time.sleep(0.5)
-
-                    # Now stop the loop
-                    self.background_loop.call_soon_threadsafe(self.background_loop.stop)
-                except RuntimeError:
-                    # Loop may already be stopped
-                    pass
-
-            if hasattr(self, "async_thread"):
-                self.async_thread.join(timeout=5)
-                if self.async_thread.is_alive():
-                    self.logger.warning("Background thread did not stop within timeout")
-
-            self.logger.info("Cleanup completed")
-
-    async def _run_background_tasks(self):
-        """Run background async tasks (event processing and health monitoring only)."""
-        try:
-            self._background_tasks = [
-                asyncio.create_task(self._process_event_queue()),
-                asyncio.create_task(self._health_monitor()),
-            ]
-
-            done, pending = await asyncio.wait(
-                self._background_tasks, return_when=asyncio.FIRST_COMPLETED
-            )
-
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        except asyncio.CancelledError:
-            # Graceful shutdown requested
-            self.logger.info("Background tasks cancelled during shutdown")
-        except Exception as e:
-            self.logger.error(f"Background tasks error: {e}")
-        finally:
-            if self._databricks_forwarder:
-                await self._databricks_forwarder.close()
-
-    async def _run_async_tasks(self):
-        """Run async tasks (Databricks forwarding and health monitoring)."""
-        try:
-            await self._initialize_databricks_async()
-
-            tasks = [
-                asyncio.create_task(self._process_event_queue()),
-                asyncio.create_task(self._health_monitor()),
-            ]
-
-            done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
-            )
-
-            for task in pending:
-                task.cancel()
-
-        except Exception as e:
-            self.logger.error(f"Async tasks error: {e}")
-        finally:
-            if self._databricks_forwarder:
-                await self._databricks_forwarder.close()
+            # POSIX installs signal handlers for a graceful drain; this covers platforms
+            # (e.g. Windows) where loop.add_signal_handler is unavailable.
+            self.logger.info("Interrupted; shutting down")
 
     async def stream_forever(self):
         """
-        Start asynchronous streaming.
-        Use this method in async contexts.
+        Start asynchronous streaming. Use inside an ``async with`` block.
+
+        Components and authentication are set up by ``__aenter__``; this runs the
+        producer/consumer pipeline until the stream ends or the block is exited.
         """
         if not self._pubsub_client:
-            raise RuntimeError(
-                "Must initialize components first - use async with statement"
-            )
-
+            raise RuntimeError("Must initialize components first - use an 'async with' statement")
         self.logger.info(f"Starting async streaming for {self.sf_object}")
-        self.running = True
-
-        try:
-            replay_type, replay_id = self._get_subscription_params()
-
-            self.logger.info(f"Starting subscription to {self.topic}")
-            self.logger.info(f"Batch size: {self.batch_size}, Mode: {replay_type}")
-
-            async_task = asyncio.create_task(self._run_async_tasks())
-
-            subscription_task = asyncio.create_task(
-                asyncio.to_thread(
-                    self._pubsub_client.subscribe,
-                    self.topic,
-                    replay_type,
-                    replay_id,
-                    self.batch_size,
-                    self._salesforce_event_callback,
-                )
-            )
-
-            done, pending = await asyncio.wait(
-                [async_task, subscription_task], return_when=asyncio.FIRST_COMPLETED
-            )
-
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        finally:
-            self.running = False
+        # No OS signal handlers here: lifecycle is owned by the async-with caller.
+        await self._run_pipeline(install_signals=False)
 
     async def __aenter__(self):
-        """Async context manager entry."""
+        """Async context manager entry: initialize components and authenticate."""
         self._initialize_components()
-
         self.logger.info("Authenticating with Salesforce...")
-        self._pubsub_client.authenticate()
+        await self._pubsub_client.authenticate()
         self.logger.info("Authentication successful!")
-
-        await self._initialize_databricks_async()
-
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
+        """Async context manager exit: flush and close (idempotent)."""
         self.running = False
-        if self._databricks_forwarder:
-            await self._databricks_forwarder.close()
-
+        await self._shutdown()
         self.logger.info("SalesforceZerobus streaming stopped")
         return False
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get current streaming statistics including both recovery layers."""
+        """Get current streaming statistics."""
         stats = {
             "sf_object_channel": self.sf_object_channel,
             "sf_object": self.sf_object,
             "topic": self.topic,
             "databricks_table": self.databricks_table,
             "running": self.running,
-            "queue_size": self.event_queue.qsize(),
+            "queue_size": self._queue.qsize() if self._queue is not None else 0,
             "org_id": self.org_id,
+            "last_durable_replay_id": self._last_durable_replay_id,
         }
 
-        # Add Salesforce flow controller stats
-        if self._flow_controller:
-            flow_stats = self._flow_controller.get_health_status()
-            # Prefix flow controller stats for clarity
-            for key, value in flow_stats.items():
-                stats[f"salesforce_{key}"] = value
-
-        # Add basic Zerobus stream status (detailed health requires async)
+        # Basic Zerobus stream status (detailed health requires async)
         if self._databricks_forwarder:
             stats["zerobus_stream_active"] = self._databricks_forwarder.stream is not None
 
-        # Add Zerobus configuration
+        # Zerobus configuration
         stats["zerobus_config"] = self.zerobus_config.copy()
 
         return stats

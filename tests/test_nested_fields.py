@@ -40,11 +40,7 @@ def _load_nested_functions():
         "_build_struct_touched_sql",
         "_build_merge_sql",
     }
-    keep = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in wanted
-    ]
+    keep = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     namespace = {
         "re": re,
         "hashlib": hashlib,
@@ -98,12 +94,14 @@ _FLAT_FIELDS = [
     StructField("Age", LongType()),
 ]
 
-_BILLING_ADDRESS_TYPE = StructType([
-    StructField("Street", StringType()),
-    StructField("City", StringType()),
-    StructField("State", StringType()),
-    StructField("Latitude", DoubleType()),
-])
+_BILLING_ADDRESS_TYPE = StructType(
+    [
+        StructField("Street", StringType()),
+        StructField("City", StringType()),
+        StructField("State", StringType()),
+        StructField("Latitude", DoubleType()),
+    ]
+)
 
 _NESTED_FIELDS = [
     StructField("Name", StringType()),
@@ -112,14 +110,18 @@ _NESTED_FIELDS = [
 ]
 
 # Doubly nested: Address.Geo.Lat / Address.Geo.Lng
-_GEO_TYPE = StructType([
-    StructField("Lat", DoubleType()),
-    StructField("Lng", DoubleType()),
-])
-_DEEP_ADDRESS_TYPE = StructType([
-    StructField("Street", StringType()),
-    StructField("Geo", _GEO_TYPE),
-])
+_GEO_TYPE = StructType(
+    [
+        StructField("Lat", DoubleType()),
+        StructField("Lng", DoubleType()),
+    ]
+)
+_DEEP_ADDRESS_TYPE = StructType(
+    [
+        StructField("Street", StringType()),
+        StructField("Geo", _GEO_TYPE),
+    ]
+)
 _DEEP_FIELDS = [
     StructField("Id", StringType()),
     StructField("Address", _DEEP_ADDRESS_TYPE),
@@ -129,6 +131,7 @@ _DEEP_FIELDS = [
 # ===========================================================================
 # _path_key
 # ===========================================================================
+
 
 def test_path_key_flat():
     result = _path_key("FirstName")
@@ -163,6 +166,7 @@ def test_path_key_deterministic():
 # _path_sql
 # ===========================================================================
 
+
 def test_path_sql_flat():
     assert _path_sql("Name", "t") == "t.`Name`"
 
@@ -182,6 +186,7 @@ def test_path_sql_deeply_nested():
 # ===========================================================================
 # _leaf_specs
 # ===========================================================================
+
 
 def test_leaf_specs_flat_fields():
     specs = _leaf_specs(_FLAT_FIELDS)
@@ -234,6 +239,7 @@ def test_leaf_specs_struct_only_field():
 # _schema_leaf_paths
 # ===========================================================================
 
+
 def test_schema_leaf_paths_flat():
     schema = StructType(_FLAT_FIELDS)
     paths = _schema_leaf_paths(schema)
@@ -268,11 +274,14 @@ def test_schema_leaf_paths_empty():
 # _build_struct_touched_sql (all paths available)
 # ===========================================================================
 
+
 def test_struct_touched_sql_flat_struct():
-    simple = StructType([
-        StructField("Street", StringType()),
-        StructField("City", StringType()),
-    ])
+    simple = StructType(
+        [
+            StructField("Street", StringType()),
+            StructField("City", StringType()),
+        ]
+    )
     result = _build_struct_touched_sql("Addr", simple)
     assert f"s.`__chg__{_k('Addr.Street')}`" in result
     assert f"s.`__chg__{_k('Addr.City')}`" in result
@@ -297,11 +306,14 @@ def test_struct_touched_sql_single_leaf():
 # available_paths guard - _build_struct_touched_sql
 # ===========================================================================
 
+
 def test_struct_touched_partial_paths():
-    simple = StructType([
-        StructField("Street", StringType()),
-        StructField("City", StringType()),
-    ])
+    simple = StructType(
+        [
+            StructField("Street", StringType()),
+            StructField("City", StringType()),
+        ]
+    )
     result = _build_struct_touched_sql("Addr", simple, {"Addr.Street"})
     assert f"__chg__{_k('Addr.Street')}" in result
     assert _k("Addr.City") not in result
@@ -309,17 +321,20 @@ def test_struct_touched_partial_paths():
 
 
 def test_struct_touched_no_paths_available():
-    simple = StructType([
-        StructField("Street", StringType()),
-        StructField("City", StringType()),
-    ])
+    simple = StructType(
+        [
+            StructField("Street", StringType()),
+            StructField("City", StringType()),
+        ]
+    )
     result = _build_struct_touched_sql("Addr", simple, set())
     assert result == "false"
 
 
 def test_struct_touched_nested_partial():
     result = _build_struct_touched_sql(
-        "Address", _DEEP_ADDRESS_TYPE,
+        "Address",
+        _DEEP_ADDRESS_TYPE,
         {"Address.Geo.Lat", "Address.Geo.Lng"},
     )
     assert _k("Address.Geo.Lat") in result
@@ -330,6 +345,7 @@ def test_struct_touched_nested_partial():
 # ===========================================================================
 # _build_merge_sql - update mode (all paths available)
 # ===========================================================================
+
 
 def test_merge_sql_scalar_update():
     sql = _build_merge_sql("Revenue", DoubleType(), "update")
@@ -372,6 +388,7 @@ def test_merge_sql_deeply_nested_update():
 # _build_merge_sql - insert mode (all paths available)
 # ===========================================================================
 
+
 def test_merge_sql_scalar_insert():
     sql = _build_merge_sql("Revenue", DoubleType(), "insert")
     assert "ELSE NULL END" in sql
@@ -395,6 +412,7 @@ def test_merge_sql_nested_struct_insert():
 # ===========================================================================
 # available_paths guard - _build_merge_sql
 # ===========================================================================
+
 
 def test_merge_sql_missing_scalar_fallback_update():
     sql = _build_merge_sql("Revenue", DoubleType(), "update", set())
@@ -453,6 +471,7 @@ def test_merge_sql_deeply_nested_partial():
 # End-to-end: BillingAddress.Street scenario
 # ===========================================================================
 
+
 def test_billing_address_street_end_to_end():
     fields = [StructField("BillingAddress", _BILLING_ADDRESS_TYPE)]
     specs = _leaf_specs(fields)
@@ -477,18 +496,14 @@ def test_billing_address_street_end_to_end():
 
 def test_schema_evolution_end_to_end():
     batch_paths = {"BillingAddress.Street"}
-    update_sql = _build_merge_sql(
-        "BillingAddress", _BILLING_ADDRESS_TYPE, "update", batch_paths
-    )
+    update_sql = _build_merge_sql("BillingAddress", _BILLING_ADDRESS_TYPE, "update", batch_paths)
     assert "resolve_chain" in update_sql
     assert f"s.`__chain__{_k('BillingAddress.Street')}`" in update_sql
     assert "t.`BillingAddress`.`City`" in update_sql
     assert "t.`BillingAddress`.`State`" in update_sql
     assert "t.`BillingAddress`.`Latitude`" in update_sql
 
-    insert_sql = _build_merge_sql(
-        "BillingAddress", _BILLING_ADDRESS_TYPE, "insert", batch_paths
-    )
+    insert_sql = _build_merge_sql("BillingAddress", _BILLING_ADDRESS_TYPE, "insert", batch_paths)
     assert "CAST(NULL AS STRING)" in insert_sql
     assert "t.`BillingAddress`.`City`" not in insert_sql
 

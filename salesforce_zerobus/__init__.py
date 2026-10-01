@@ -1,5 +1,5 @@
 """
-SalesforceZerobus - Simple Python library for streaming Salesforce Change Data Capture 
+SalesforceZerobus - Simple Python library for streaming Salesforce Change Data Capture
 events to Databricks Delta tables in real-time.
 
 Example:
@@ -20,10 +20,10 @@ Example:
             "ingest_endpoint": "workspace-id.ingest.cloud.databricks.com"
         }
     )
-    
+
     # Start streaming (blocking)
     streamer.start()
-    
+
     # Or use async context manager
     async with streamer:
         await streamer.stream_forever()
