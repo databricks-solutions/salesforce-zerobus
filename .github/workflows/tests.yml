@@ -7,6 +7,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Python project lives under python/; run all shell steps there. (checkout/setup-python
+    # use `uses:` and are unaffected; they operate on the repo root.)
+    defaults:
+      run:
+        working-directory: python
     strategy:
       fail-fast: false
       matrix:

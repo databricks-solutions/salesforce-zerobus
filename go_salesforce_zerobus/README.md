@@ -201,7 +201,7 @@ The table keeps the original 16 columns shared with the Python service and adds 
 - **`record_data_json`** is standard JSON (unions unwrapped), matching the Python service.
 - **Routing:** by default all orgs share one table, keyed by `org_id`, `tenant_key` and `topic`. Set `subscriptions.target_table` to give an org, or one object, its own table.
 
-**Downstream:** `lakeflow_declarative_pipeline.py` infers each object's Avro schema from the latest row across *all* orgs, which assumes one org per table. Before many orgs share a table, make that lookup `org_id`-aware, or route orgs to separate tables.
+**Downstream:** `python/lakeflow_declarative_pipeline.py` infers each object's Avro schema from the latest row across *all* orgs, which assumes one org per table. Before many orgs share a table, make that lookup `org_id`-aware, or route orgs to separate tables.
 
 ## Operating
 

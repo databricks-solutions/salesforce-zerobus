@@ -18,6 +18,16 @@ A simple, production-ready Python library for streaming Salesforce Change Data C
 Using Salesforce-Zerobus in production? We want to hear from you! [Complete this brief survey](https://forms.gle/B6jWY5bDvGt7NeYi6) to share your use case and help us prioritize features that matter most to the community.
 
 
+## Repository layout
+
+This repo ships two independent implementations of the connector:
+
+- **[`python/`](python/)** — the Python library + Databricks Asset Bundle described in this README (single org per instance).
+- **[`go_salesforce_zerobus/`](go_salesforce_zerobus/)** — a long-term, multi-tenant pure-Go service (see its own README).
+
+> The Python project is self-contained under `python/`. **Run the commands below from there — `cd python` first.**
+
+
 ## Features
 
 - **Real-time Streaming** - Sub-second event forwarding to Databricks 
@@ -38,8 +48,9 @@ Using Salesforce-Zerobus in production? We want to hear from you! [Complete this
 - Python 3.10 or higher
 - All dependencies are available via PyPI!
 
-**Install dependencies:**
+**Install dependencies** (from the `python/` directory):
 ```bash
+cd python
 uv sync
 ```
 
@@ -305,7 +316,7 @@ your_stream.writeStream \
 - Prefer lightweight Python applications
 - Need automatic table creation and replay recovery
 
-**[View Full Spark Data Source Documentation →](spark_datasource/README.md)**
+**[View Full Spark Data Source Documentation →](python/spark_datasource/README.md)**
 
 ## Prerequisites & Local Setup
 
@@ -437,6 +448,9 @@ streamer = SalesforceZerobus(
 ```
 ## 🧱 Run as Databricks App
 Running this service as a Databricks app and subscribing to ChangeEvents is a great way to stream all Salesforce changes with low costs, simplified ci/cd, and a rich governance model. 
+
+> The Databricks Asset Bundle (`databricks.yml`, `resources/`, `app.yaml`) lives in `python/` — run the `databricks` commands below from there (`cd python`).
+
 View the databricks.yml to see the .whl being built. 
 1. View the contents of resources/app.yml
 2. Configure the app.yaml file variables
@@ -451,7 +465,7 @@ View the databricks.yml to see the .whl being built.
 ### Running the service as a Databricks Job
 Running this service as a Databricks job leverages the For/Each task type to ingest several Salesforce Objects in parallel. 
 
-Running the following commands in the terminal will deploy a serverless job, the packaged .whl file, and the notebook_task.py. To view the contents being built view databricks.yml
+Running the following commands in the terminal will deploy a serverless job, the packaged .whl file, and the notebook_task.py. To view the contents being built view databricks.yml. (The bundle lives in `python/` — run these from there: `cd python`.)
 
 1. In the notebook_task.py file edit the variables salesforce_auth, databricks_auth, secret_scope_name before deploying the job
 2. Run the following commands: 
@@ -751,8 +765,8 @@ If you need to regenerate the Protocol Buffer files (e.g., after modifying `.pro
 # Install protoc dependencies
 uv pip install grpcio-tools>=1.50.0
 
-# Navigate to the proto directory
-cd salesforce_zerobus/pubsub/proto/
+# Navigate to the proto directory (from the repo root)
+cd python/salesforce_zerobus/pubsub/proto/
 
 # Compile protobuf files
 python -m grpc_tools.protoc \
