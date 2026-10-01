@@ -1,8 +1,10 @@
 // Package lakebase is the Lakebase Postgres checkpoint store.
 //
 // Authentication uses short-lived Databricks OAuth database credentials
-// (minted via the Postgres API and injected on every new connection), or a
-// native Postgres password for environments without OAuth.
+// (at most 1 hour), minted via the Postgres API and injected on every new
+// connection; or a native Postgres password for environments without OAuth.
+// OAuth credentials are refreshed in the background well before they expire,
+// and pooled connections are recycled before their credential's lifetime ends.
 package lakebase
 
 import (
@@ -15,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/databricks/databricks-sdk-go/common/types/duration"
 	"github.com/databricks/databricks-sdk-go/service/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,6 +47,8 @@ type Config struct {
 	ConnectTimeout time.Duration
 	// SSLMode defaults to "require" (Lakebase requires TLS).
 	SSLMode string
+	// TokenTTL is the requested OAuth credential lifetime (5m–1h, default 1h).
+	TokenTTL time.Duration
 }
 
 // Connect opens a pgx pool to Lakebase and verifies connectivity.
@@ -71,12 +76,22 @@ func Connect(ctx context.Context, cfg Config, api CredentialAPI, logger *slog.Lo
 		return nil, errors.New("lakebase: user is required")
 	}
 
+	ttl := cfg.TokenTTL
+	if ttl <= 0 || ttl > time.Hour {
+		ttl = time.Hour
+	}
+	ttl = max(ttl, 5*time.Minute)
+
 	pw := cfg.Password
 	if pw == nil {
 		if api == nil || cfg.Endpoint == "" {
 			return nil, errors.New("lakebase: endpoint is required for OAuth credentials")
 		}
-		tc := &tokenCache{api: api, endpoint: cfg.Endpoint, now: time.Now}
+		tc := newTokenCache(api, cfg.Endpoint, ttl, logger)
+		if _, err := tc.token(ctx); err != nil {
+			return nil, fmt.Errorf("lakebase: minting database credential: %w", err)
+		}
+		go tc.refreshLoop(ctx)
 		pw = tc.token
 	}
 
@@ -90,8 +105,11 @@ func Connect(ctx context.Context, cfg Config, api CredentialAPI, logger *slog.Lo
 		return nil, fmt.Errorf("lakebase: %w", err)
 	}
 	pc.MaxConns = int32(cfg.MaxConns)
-	pc.MaxConnLifetime = 45 * time.Minute // OAuth tokens last 1h; Lakebase closes idle conns at 24h
-	pc.MaxConnIdleTime = 10 * time.Minute
+	// Recycle connections before their credential expires (45m for 1h tokens).
+	// Lakebase also closes idle connections after 24h.
+	pc.MaxConnLifetime = ttl * 3 / 4
+	pc.MaxConnLifetimeJitter = ttl / 20
+	pc.MaxConnIdleTime = min(10*time.Minute, ttl/2)
 	pc.HealthCheckPeriod = time.Minute
 	pc.BeforeConnect = func(ctx context.Context, cc *pgx.ConnConfig) error {
 		p, err := pw(ctx)
@@ -125,33 +143,151 @@ func Connect(ctx context.Context, cfg Config, api CredentialAPI, logger *slog.Lo
 	}
 }
 
-// tokenCache mints and caches OAuth database credentials.
+// tokenCache mints, caches, and proactively refreshes OAuth database
+// credentials, mirroring the background-refresh pattern used by Lakebase
+// apps: refresh at ~75% of the credential's lifetime, retry with backoff on
+// failure, and keep serving the current credential while it is still valid.
+// All expiry math uses wall-clock time (see package dbauth), so a host sleep
+// or container suspension can never make an expired credential look valid.
 type tokenCache struct {
 	api      CredentialAPI
 	endpoint string
+	ttl      time.Duration
+	logger   *slog.Logger
 	now      func() time.Time
+	retry    backoff.Policy
 
 	mu      sync.Mutex
 	cached  string
+	issued  time.Time
 	expires time.Time
+	minting chan struct{} // non-nil while a mint is in flight
 }
 
+func newTokenCache(api CredentialAPI, endpoint string, ttl time.Duration, logger *slog.Logger) *tokenCache {
+	return &tokenCache{
+		api: api, endpoint: endpoint, ttl: ttl, logger: logger,
+		now:   func() time.Time { return time.Now().Round(0) },
+		retry: backoff.Policy{Base: 5 * time.Second, Max: time.Minute},
+	}
+}
+
+// refreshAt is when the cached credential should be replaced: after 75% of
+// its lifetime (45 minutes for a 1-hour credential).
+func (t *tokenCache) refreshAtLocked() time.Time {
+	return t.expires.Add(-t.expires.Sub(t.issued) / 4)
+}
+
+// token returns a valid credential, minting synchronously only when the
+// cache is empty, due for refresh, or expired. If a refresh fails while the
+// current credential is still valid, the current one is returned.
 func (t *tokenCache) token(ctx context.Context) (string, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.cached != "" && t.now().Before(t.expires.Add(-15*time.Minute)) {
-		return t.cached, nil
+	now := t.now()
+	if t.cached != "" && now.Before(t.refreshAtLocked()) {
+		tok := t.cached
+		t.mu.Unlock()
+		return tok, nil
 	}
-	cred, err := t.api.GenerateDatabaseCredential(ctx, postgres.GenerateDatabaseCredentialRequest{Endpoint: t.endpoint})
-	if err != nil {
+	t.mu.Unlock()
+	if err := t.refresh(ctx); err != nil {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.cached != "" && t.now().Before(t.expires) {
+			t.logger.Warn("Lakebase credential refresh failed; using the current credential until it expires",
+				"expires_in", t.expires.Sub(t.now()).Round(time.Second), "error", err)
+			return t.cached, nil
+		}
 		return "", err
 	}
-	t.cached = cred.Token
-	t.expires = t.now().Add(time.Hour)
-	if cred.ExpireTime != nil {
-		t.expires = cred.ExpireTime.AsTime()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cached == "" || !t.now().Before(t.expires) {
+		// Another caller's mint failed and there is no valid fallback.
+		return "", errors.New("no valid Lakebase database credential (refresh failed)")
 	}
 	return t.cached, nil
+}
+
+// refresh mints a new credential. Concurrent callers share one mint.
+func (t *tokenCache) refresh(ctx context.Context) error {
+	t.mu.Lock()
+	if wait := t.minting; wait != nil {
+		t.mu.Unlock()
+		select {
+		case <-wait:
+			return nil // the in-flight mint's result is now cached (or the caller falls back)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	done := make(chan struct{})
+	t.minting = done
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		t.minting = nil
+		t.mu.Unlock()
+		close(done)
+	}()
+
+	req := postgres.GenerateDatabaseCredentialRequest{Endpoint: t.endpoint}
+	if t.ttl > 0 && t.ttl < time.Hour {
+		req.Ttl = duration.New(t.ttl)
+	}
+	cred, err := t.api.GenerateDatabaseCredential(ctx, req)
+	if err != nil {
+		return err
+	}
+	if cred.Token == "" {
+		return errors.New("database credential response has no token")
+	}
+	issued := t.now()
+	expires := issued.Add(t.ttl)
+	if cred.ExpireTime != nil {
+		if e := cred.ExpireTime.AsTime().Round(0); e.After(issued) {
+			expires = e
+		}
+	}
+	t.mu.Lock()
+	t.cached, t.issued, t.expires = cred.Token, issued, expires
+	t.mu.Unlock()
+	t.logger.Info("Lakebase credential refreshed", "expires_in", expires.Sub(issued).Round(time.Second))
+	return nil
+}
+
+// refreshLoop replaces the credential before it expires until ctx is done,
+// so connection setup never has to wait on a mint.
+func (t *tokenCache) refreshLoop(ctx context.Context) {
+	attempt := 0
+	for {
+		t.mu.Lock()
+		wait := t.refreshAtLocked().Sub(t.now())
+		t.mu.Unlock()
+		if attempt > 0 {
+			wait = t.retry.Delay(attempt - 1)
+		}
+		// Re-check at least every minute: the wall clock can jump forward
+		// (host sleep) while the timer, which uses monotonic time, does not.
+		if err := backoff.SleepFor(ctx, min(max(wait, 0), time.Minute)); err != nil {
+			return
+		}
+		t.mu.Lock()
+		due := !t.now().Before(t.refreshAtLocked())
+		t.mu.Unlock()
+		if attempt == 0 && !due {
+			continue
+		}
+		if err := t.refresh(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			attempt++
+			t.logger.Warn("Lakebase credential refresh failed; retrying", "attempt", attempt, "error", err)
+			continue
+		}
+		attempt = 0
+	}
 }
 
 // Store implements checkpoint.Store on a Lakebase table.

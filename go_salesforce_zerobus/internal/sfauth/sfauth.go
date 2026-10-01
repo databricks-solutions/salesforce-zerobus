@@ -143,7 +143,7 @@ func (a *oauthAuth) Authenticate(ctx context.Context) (*Credentials, error) {
 	if err := json.Unmarshal(body, &info); err != nil || info.OrganizationID == "" {
 		return nil, &Error{Err: fmt.Errorf("userinfo response missing organization_id")}
 	}
-	return &Credentials{AccessToken: tok.AccessToken, InstanceURL: instance, OrgID: info.OrganizationID, IssuedAt: time.Now()}, nil
+	return &Credentials{AccessToken: tok.AccessToken, InstanceURL: instance, OrgID: info.OrganizationID, IssuedAt: time.Now().Round(0)}, nil
 }
 
 func (a *oauthAuth) do(ctx context.Context, method, u string, body io.Reader, contentType, bearer string) ([]byte, int, error) {
@@ -198,7 +198,7 @@ func (a *soapAuth) Authenticate(ctx context.Context) (*Credentials, error) {
 	if r.SessionID == "" || r.UserInfo.OrganizationID == "" {
 		return nil, &Error{Err: fmt.Errorf("SOAP login response missing sessionId or organizationId")}
 	}
-	return &Credentials{AccessToken: r.SessionID, InstanceURL: baseURL(r.ServerURL), OrgID: r.UserInfo.OrganizationID, IssuedAt: time.Now()}, nil
+	return &Credentials{AccessToken: r.SessionID, InstanceURL: baseURL(r.ServerURL), OrgID: r.UserInfo.OrganizationID, IssuedAt: time.Now().Round(0)}, nil
 }
 
 type soapEnvelope struct {
@@ -291,7 +291,9 @@ func NewTokenSource(a Authenticator, ttl time.Duration, limiter *rate.Limiter) *
 	if ttl <= 0 {
 		ttl = time.Hour
 	}
-	return &TokenSource{auth: a, ttl: ttl, limiter: limiter, now: time.Now}
+	// Wall-clock comparisons, so a session that aged out during host sleep is
+	// not reused.
+	return &TokenSource{auth: a, ttl: ttl, limiter: limiter, now: func() time.Time { return time.Now().Round(0) }}
 }
 
 // Get returns a valid session, logging in if needed.

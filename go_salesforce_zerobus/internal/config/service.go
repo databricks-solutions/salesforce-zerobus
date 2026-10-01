@@ -53,6 +53,7 @@ type Service struct {
 	LakebaseSchema     string
 	LakebasePassRef    string // native Postgres password (secret ref) instead of OAuth
 	LakebaseMaxConns   int
+	LakebaseTokenTTL   time.Duration
 	RegistryWriters    []string // Postgres roles granted registry write access
 
 	Sink string // zerobus | memory
@@ -136,6 +137,7 @@ func Load(args []string, getenv Getenv) (*Service, error) {
 	fs.StringVar(&s.LakebaseSchema, "lakebase-schema", env.str("SFZB_LAKEBASE_SCHEMA", "sfzb"), "Postgres schema for checkpoints")
 	fs.StringVar(&s.LakebasePassRef, "lakebase-password-ref", env.str("SFZB_LAKEBASE_PASSWORD_REF", ""), "secret ref for a native Postgres password (instead of OAuth)")
 	fs.IntVar(&s.LakebaseMaxConns, "lakebase-max-conns", env.int("SFZB_LAKEBASE_MAX_CONNS", 4), "Postgres pool size")
+	fs.DurationVar(&s.LakebaseTokenTTL, "lakebase-token-ttl", env.dur("SFZB_LAKEBASE_TOKEN_TTL", time.Hour), "OAuth database credential lifetime (5m-1h); refreshed at 75%")
 	var writers string
 	fs.StringVar(&writers, "registry-writers", env.str("SFZB_REGISTRY_WRITERS", ""), "comma-separated Postgres roles allowed to manage tenants")
 
@@ -274,6 +276,9 @@ func (s *Service) Validate() error {
 	case "verify", "off":
 	default:
 		errs = append(errs, fmt.Errorf("SFZB_SCHEMA_MODE must be migrate, verify, or off, got %q", s.SchemaMode))
+	}
+	if s.LakebaseTokenTTL < 5*time.Minute || s.LakebaseTokenTTL > time.Hour {
+		errs = append(errs, errors.New("SFZB_LAKEBASE_TOKEN_TTL must be between 5m and 1h"))
 	}
 	if s.ZBStreamsPerTable != "auto" {
 		if n, err := strconv.Atoi(s.ZBStreamsPerTable); err != nil || n < 1 {
