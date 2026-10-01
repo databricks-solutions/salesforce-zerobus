@@ -96,3 +96,9 @@ exclude = [
     ".*_pb2.py",
     ".*_pb2_grpc.py",
 ]
+
+[tool.pytest.ini_options]
+# Put the project root (this dir) on sys.path so `salesforce_zerobus` imports under any
+# pytest invocation (`pytest`, `uv run pytest`, CI) — not just `python -m pytest`.
+pythonpath = ["."]
+testpaths = ["tests"]
