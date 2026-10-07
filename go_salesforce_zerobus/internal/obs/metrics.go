@@ -47,7 +47,11 @@ var (
 
 	SchemaCacheBytes  = gauge("sfzb_schema_cache_bytes", "Bytes held by the Avro schema cache.")
 	SchemaCacheHits   = counter("sfzb_schema_cache_hits_total", "Avro schema cache hits.")
-	SchemaCacheMisses = counter("sfzb_schema_cache_misses_total", "Avro schema cache misses (GetSchema RPCs).")
+	SchemaCacheMisses = counter("sfzb_schema_cache_misses_total", "Avro schema cache misses.")
+	SchemaFetches     = counter("sfzb_schema_fetches_total", "Salesforce GetSchema RPCs (cache and registry misses).")
+
+	SchemaRegistryLookups = counterVec("sfzb_schema_registry_lookups_total", "Lakebase schema registry lookups by result (hit, miss, error).", "result")
+	SchemaRegistryWrites  = counterVec("sfzb_schema_registry_writes_total", "Schemas written to the Lakebase schema registry by result (ok, error, dropped).", "result")
 
 	RateLimitWait = histogramVec("sfzb_ratelimit_wait_seconds", "Time spent waiting on rate limiters.",
 		[]float64{.001, .01, .1, .5, 1, 5, 15, 30, 60, 120}, "limiter")

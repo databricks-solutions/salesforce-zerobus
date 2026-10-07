@@ -11,7 +11,7 @@ PG_PORT ?= 55432
 PG_DIR  ?= /tmp/sfzb-test-pg
 MODULE   = github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus
 
-.PHONY: all build build-linux proto test test-race test-pg test-integration lint docker load demo \
+.PHONY: all build build-linux proto test test-race test-pg test-pipeline test-integration lint docker load demo \
         validate bundle-validate bundle-deploy bootstrap lakebase-env clean
 
 all: lint test build
@@ -42,14 +42,18 @@ test:
 test-race:
 	go test -race ./...
 
-# Runs the registry and checkpoint SQL tests against a throwaway local
+# Runs the registry, checkpoint, and schema registry SQL tests against a throwaway local
 # Postgres (needs initdb/pg_ctl on PATH).
 test-pg:
 	rm -rf $(PG_DIR) && initdb -D $(PG_DIR) -U postgres --auth=trust >/dev/null
 	pg_ctl -D $(PG_DIR) -o "-p $(PG_PORT) -k /tmp -c listen_addresses=127.0.0.1" -l $(PG_DIR).log -w start >/dev/null
 	SFZB_TEST_PG_DSN="host=127.0.0.1 port=$(PG_PORT) user=postgres dbname=postgres sslmode=disable" \
-		go test -race ./internal/registry/ ./internal/checkpoint/... ; \
+		go test -race ./internal/registry/ ./internal/checkpoint/... ./internal/schemareg/ ; \
 		status=$$?; pg_ctl -D $(PG_DIR) -m fast stop >/dev/null; exit $$status
+
+# Pipeline event semantics and typed-view SQL (pure Python, no Spark).
+test-pipeline:
+	cd pipeline && python3 -m pytest -q .
 
 # Against real Lakebase (needs SFZB_LAKEBASE_* and DATABRICKS_* in the env).
 test-integration:
@@ -74,7 +78,9 @@ demo: build
 validate:
 	go run ./cmd/zerobus validate
 
-BUNDLE_ARGS = -t $(TARGET) $(if $(PROFILE),--profile $(PROFILE)) --var service_principal_app_id=$(SP) --var catalog=$(CATALOG)
+BUNDLE_ARGS = -t $(TARGET) $(if $(PROFILE),--profile $(PROFILE)) --var service_principal_app_id=$(SP) --var catalog=$(CATALOG) \
+	$(if $(CDC_TABLE),--var cdc_table=$(CDC_TABLE)) $(if $(PIPELINE_CATALOG),--var pipeline_catalog=$(PIPELINE_CATALOG)) \
+	$(if $(PIPELINE_SCHEMA),--var pipeline_schema=$(PIPELINE_SCHEMA))
 
 bundle-validate:
 	databricks bundle validate $(BUNDLE_ARGS)

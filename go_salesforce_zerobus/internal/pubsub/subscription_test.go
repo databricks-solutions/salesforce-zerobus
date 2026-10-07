@@ -3,9 +3,11 @@ package pubsub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/backoff"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/checkpoint"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/schemareg"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/sfauth"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/sink"
 	zbsink "github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/sink/zerobus"
@@ -276,5 +279,83 @@ func TestSubscriptionSinkResetAndOrgMismatch(t *testing.T) {
 	sub.ExpectedOrgID = "00DZZZZZZZZZZZZZZZ"
 	if err := sub.Run(context.Background(), wm.Restart(), Start{Preset: tenant.Latest}); Classify(err) != ClassConfig {
 		t.Fatalf("org mismatch = %v", err)
+	}
+}
+
+type fakeRegistry struct {
+	mu      sync.Mutex
+	schemas map[string]string
+	puts    []schemareg.Record
+	failGet error
+}
+
+func (f *fakeRegistry) Get(_ context.Context, org, id string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failGet != nil {
+		return "", false, f.failGet
+	}
+	js, ok := f.schemas[org+"/"+id]
+	return js, ok, nil
+}
+
+func (f *fakeRegistry) Put(r schemareg.Record) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.puts = append(f.puts, r)
+	f.schemas[r.OrgID+"/"+r.SchemaID] = r.JSON
+}
+
+// runToAck runs a fresh subscription until every emitted event is acked.
+func (e *env) runToAck(n int) {
+	e.t.Helper()
+	sub, wm := e.subscription(500)
+	cancel, done := runAsync(sub, wm.Restart(), Start{Preset: tenant.Earliest})
+	waitFor(e.t, "all acked", func() bool { return bytes.Equal(wm.Acked(), fakepubsub.ReplayID(n)) })
+	cancel()
+	<-done
+}
+
+func TestSubscriptionSchemaRegistryAndVariantRows(t *testing.T) {
+	e := newEnv(t, 0)
+	reg := &fakeRegistry{schemas: map[string]string{}}
+	e.shared.SchemaRegistry = reg
+	e.emit(5)
+	e.runToAck(5)
+	if e.ps.SchemaCalls() != 1 || len(reg.puts) != 1 {
+		t.Fatalf("first replica: GetSchema calls=%d registry puts=%d, want 1 and 1", e.ps.SchemaCalls(), len(reg.puts))
+	}
+	if p := reg.puts[0]; p.OrgID != orgID || p.SchemaID != e.schema || p.TenantKey != "acme" || p.Topic != topic || p.JSON != cdc.AccountSchemaJSON {
+		t.Errorf("registered %+v", p)
+	}
+
+	// A replica with a cold cache finds the schema in the registry.
+	e.shared.Schemas = NewSchemaCache(0)
+	e.emit(5)
+	e.runToAck(10)
+	if e.ps.SchemaCalls() != 1 || len(reg.puts) != 1 {
+		t.Fatalf("cold replica should use the registry: GetSchema calls=%d puts=%d", e.ps.SchemaCalls(), len(reg.puts))
+	}
+
+	// A registry outage falls back to Salesforce.
+	reg.failGet = errors.New("lakebase down")
+	e.shared.Schemas = NewSchemaCache(0)
+	e.emit(5)
+	e.runToAck(15)
+	if e.ps.SchemaCalls() != 2 {
+		t.Fatalf("registry outage should fall back to GetSchema: calls=%d", e.ps.SchemaCalls())
+	}
+
+	// Rows use the variant layout by default.
+	var row eventpb.SalesforceEvent
+	if err := proto.Unmarshal(e.mem.Rows(table)[0], &row); err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(row.GetRecord()), &rec); err != nil || rec["Name"] != "Acme" {
+		t.Fatalf("record = %q (%v)", row.GetRecord(), err)
+	}
+	if row.SchemaJson != nil || row.PayloadBinary != nil || row.RecordDataJson != nil {
+		t.Errorf("variant rows should not repeat the schema or raw payload: %v", &row)
 	}
 }

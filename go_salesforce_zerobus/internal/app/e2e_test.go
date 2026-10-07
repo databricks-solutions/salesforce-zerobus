@@ -95,12 +95,12 @@ type running struct {
 	addr   string
 }
 
-func (h *harness) start(store checkpoint.Store, mem *zbsink.MemoryFactory) *running {
-	cfg, err := config.Load([]string{
+func (h *harness) start(store checkpoint.Store, mem *zbsink.MemoryFactory, flags ...string) *running {
+	cfg, err := config.Load(append([]string{
 		"-tenant-source", "file", "-tenants-file", "unused.yaml", "-sink", "memory", "-checkpoint-store", "memory",
 		"-sf-pubsub-addr", h.ps.Addr, "-sf-insecure", "-admin-addr", "127.0.0.1:0", "-startup-spread", "0",
 		"-checkpoint-interval", "50ms", "-zb-batch-linger", "2ms", "-auth-rps", "0", "-subscribe-rps", "0", "-schema-rps", "0",
-	}, func(string) string { return "" })
+	}, flags...), func(string) string { return "" })
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -341,5 +341,32 @@ func TestEndToEndIgnoresCheckpointFromAnotherOrg(t *testing.T) {
 	r.stop(t)
 	if _, rows := delivered(t, mem); rows != 5 {
 		t.Fatalf("foreign checkpoint should be ignored (replay_default EARLIEST delivers 5), got %d", rows)
+	}
+}
+
+func TestEndToEndPayloadFormats(t *testing.T) {
+	for _, format := range []string{"variant", "avro", "both"} {
+		t.Run(format, func(t *testing.T) {
+			h := newHarness(t, 1)
+			h.emit(3)
+			store := checkpoint.NewMemoryStore()
+			mem := zbsink.NewMemoryFactory(0)
+			r := h.start(store, mem, "-payload-format", format)
+			waitFor(t, "all acked", 10*time.Second, func() bool { return h.complete(store, 3) })
+			r.stop(t)
+			rows := mem.Rows(e2eTable)
+			if len(rows) != 3 {
+				t.Fatalf("rows = %d", len(rows))
+			}
+			var row eventpb.SalesforceEvent
+			if err := proto.Unmarshal(rows[0], &row); err != nil {
+				t.Fatal(err)
+			}
+			hasRecord := strings.Contains(row.GetRecord(), `"Name":"n"`)
+			hasAvro := len(row.PayloadBinary) > 0 && row.GetSchemaJson() != "" && row.GetRecordDataJson() != ""
+			if hasRecord != (format != "avro") || hasAvro != (format != "variant") {
+				t.Fatalf("%s row: record=%v avro columns=%v (%v)", format, hasRecord, hasAvro, &row)
+			}
+		})
 	}
 }

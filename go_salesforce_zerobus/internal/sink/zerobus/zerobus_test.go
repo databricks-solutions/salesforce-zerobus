@@ -8,12 +8,17 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
+
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/backoff"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/event"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/sink"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/tenant"
 )
@@ -245,8 +250,26 @@ func TestSinkOpenFailureIsUnavailableThenRecovers(t *testing.T) {
 }
 
 func TestDescriptor(t *testing.T) {
-	d, err := Descriptor()
-	if err != nil || len(d) == 0 {
-		t.Fatalf("Descriptor: %v", err)
+	fieldNames := func(f event.Format) []string {
+		d, err := Descriptor(f)
+		if err != nil {
+			t.Fatalf("Descriptor(%s): %v", f, err)
+		}
+		var msg descriptorpb.DescriptorProto
+		if err := proto.Unmarshal(d, &msg); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, field := range msg.Field {
+			names = append(names, field.GetName())
+		}
+		return names
+	}
+	variant, avro := fieldNames(event.FormatVariant), fieldNames(event.FormatAvro)
+	if len(variant) != 24 || variant[len(variant)-1] != "record" {
+		t.Errorf("variant descriptor fields = %v", variant)
+	}
+	if len(avro) != 23 || slices.Contains(avro, "record") {
+		t.Errorf("avro descriptor must omit record: %v", avro)
 	}
 }

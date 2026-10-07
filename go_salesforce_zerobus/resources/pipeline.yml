@@ -1,0 +1,60 @@
+# Downstream of the service: Salesforce CDC (variant layout) -> current state,
+# SCD2 history, and generated typed views. See pipeline/salesforce_cdc.py.
+#
+#   databricks bundle deploy -t dev --var cdc_table=<catalog.schema.table> ...
+#   databricks bundle run salesforce_cdc -t dev     # start or update the pipeline
+#   databricks bundle run typed_views -t dev        # (re)generate typed views now
+
+resources:
+  pipelines:
+    salesforce_cdc:
+      name: salesforce-cdc
+      catalog: ${var.pipeline_catalog}
+      schema: ${var.pipeline_schema}
+      serverless: true
+      channel: CURRENT
+      photon: true
+      # Triggered by default; set continuous: true for always-on, low-latency current state.
+      continuous: false
+      root_path: ../pipeline
+      libraries:
+        - file:
+            path: ../pipeline/salesforce_cdc.py
+      configuration:
+        bundle.sourcePath: ${workspace.file_path}/pipeline
+        catalog: ${var.pipeline_catalog}
+        schema: ${var.pipeline_schema}
+        source_table: ${var.cdc_table}
+
+  jobs:
+    typed_views:
+      name: salesforce-typed-views
+      description: Generates typed views over salesforce_current from the Lakebase schema registry; only objects with new schema versions are regenerated.
+      schedule:
+        quartz_cron_expression: "0 0 * * * ?"
+        timezone_id: UTC
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: generate_views
+          environment_key: default
+          spark_python_task:
+            python_file: ../pipeline/generate_views.py
+            parameters:
+              # Reads sfzb.schemas directly (the job's identity needs a Lakebase role).
+              - --lakebase-endpoint
+              - projects/${var.lakebase_project}/branches/production/endpoints/primary
+              - --current-table
+              - ${var.pipeline_catalog}.${var.pipeline_schema}.salesforce_current
+              - --view-catalog
+              - ${var.pipeline_catalog}
+              - --view-schema
+              - ${var.views_schema}
+              - --type-overrides
+              - ${var.view_type_overrides}
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              - psycopg[binary]>=3.2
+              - databricks-sdk>=0.81.0

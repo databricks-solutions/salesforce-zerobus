@@ -15,6 +15,7 @@ import (
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/checkpoint"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/event"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/obs"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/schemareg"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/sfauth"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/sink"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/tenant"
@@ -28,12 +29,23 @@ const keepaliveAfter = 50 * time.Second
 
 // Shared holds dependencies shared by every subscription on the replica.
 type Shared struct {
-	Conns            *ConnPool
-	Schemas          *SchemaCache
+	Conns   *ConnPool
+	Schemas *SchemaCache
+	// SchemaRegistry, if set, is consulted on a cache miss before Salesforce
+	// GetSchema, and records every schema fetched from Salesforce.
+	SchemaRegistry   SchemaRegistry
 	SubscribeLimiter *rate.Limiter
 	SchemaLimiter    *rate.Limiter
+	Format           event.Format
 	MaxRowBytes      int
 	Logger           *slog.Logger
+}
+
+// SchemaRegistry is a durable schema store shared by every replica (the
+// Lakebase schema registry; see package schemareg).
+type SchemaRegistry interface {
+	Get(ctx context.Context, orgID, schemaID string) (schemaJSON string, ok bool, err error)
+	Put(r schemareg.Record)
 }
 
 // Start says where a subscription begins.
@@ -206,7 +218,17 @@ func (s *Subscription) recvLoop(ctx context.Context, stream pubsubpb.PubSub_Subs
 	creds *sfauth.Credentials, gen uint64, processed chan<- struct{}) error {
 	table := s.Spec.Table
 	src := event.Source{OrgID: creds.OrgID, TenantKey: string(s.Spec.Key.Tenant), Topic: s.Spec.Key.Topic}
+	registry := s.Shared.SchemaRegistry
 	fetchSchema := func(ctx context.Context, id string) (string, error) {
+		if registry != nil {
+			js, ok, err := registry.Get(ctx, creds.OrgID, id)
+			if ok {
+				return js, nil
+			}
+			if err != nil {
+				s.Logger.Warn("Schema registry unavailable; fetching the schema from Salesforce", "schema_id", id, "error", err)
+			}
+		}
 		if l := s.Shared.SchemaLimiter; l != nil {
 			if err := l.Wait(ctx); err != nil {
 				return "", err
@@ -215,6 +237,10 @@ func (s *Subscription) recvLoop(ctx context.Context, stream pubsubpb.PubSub_Subs
 		resp, err := client.GetSchema(metadata.NewOutgoingContext(ctx, creds.Metadata()), &pubsubpb.SchemaRequest{SchemaId: id})
 		if err != nil {
 			return "", err
+		}
+		obs.SchemaFetches.Inc()
+		if registry != nil {
+			registry.Put(schemareg.Record{OrgID: creds.OrgID, SchemaID: id, TenantKey: src.TenantKey, Topic: src.Topic, JSON: resp.GetSchemaJson()})
 		}
 		return resp.GetSchemaJson(), nil
 	}
@@ -265,7 +291,7 @@ func (s *Subscription) recvLoop(ctx context.Context, stream pubsubpb.PubSub_Subs
 				obs.DecodeErrors.WithLabelValues(table).Inc()
 				s.Logger.Warn("Event could not be decoded; writing raw payload", "event_id", e.EventID, "error", e.DecodeError)
 			}
-			payload, truncated, err := event.Marshal(event.ToProto(e, src, receivedAt), s.Shared.MaxRowBytes)
+			payload, truncated, err := event.Marshal(event.ToProto(e, src, s.Shared.Format, receivedAt), s.Shared.MaxRowBytes)
 			if truncated {
 				obs.RecordsTruncated.WithLabelValues(table).Inc()
 			}

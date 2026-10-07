@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	zb "github.com/databricks/zerobus-sdk/purego/zerobus"
+
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/event"
 )
 
 // SDKConfig configures the real Zerobus factory.
@@ -21,6 +23,8 @@ type SDKConfig struct {
 	StreamsPerSDK int
 	// StreamOptions apply to every stream (buffering, recovery, timeouts).
 	StreamOptions []zb.StreamOption
+	// Format is the payload layout; it selects the descriptor's fields.
+	Format event.Format
 }
 
 // SDKFactory opens streams through a pool of SDK instances. Streams on one
@@ -45,7 +49,10 @@ func NewSDKFactory(cfg SDKConfig) (*SDKFactory, error) {
 	if cfg.StreamsPerSDK <= 0 {
 		cfg.StreamsPerSDK = 50
 	}
-	desc, err := Descriptor()
+	if cfg.Format == "" {
+		cfg.Format = event.FormatVariant
+	}
+	desc, err := Descriptor(cfg.Format)
 	if err != nil {
 		return nil, err
 	}

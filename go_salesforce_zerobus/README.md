@@ -9,6 +9,7 @@ Streams Salesforce Change Data Capture (CDC) events from **many Salesforce orgs*
 - **Onboarding is a row insert.** Tenants live in a [Lakebase](https://docs.databricks.com/aws/en/oltp/) Postgres registry that the service polls, so there is no redeploy.
 - **Credentials in Unity Catalog secrets.** Each tenant's Salesforce credentials are a [UC secret](https://docs.databricks.com/aws/en/security/secrets/unity-catalog-secrets). Access is governed by UC grants and audited.
 - **At-least-once and isolated.** A replay checkpoint advances only after Zerobus acknowledges the row. Every (org, topic) subscription has its own supervised runner, so one broken org never affects the others.
+- **No schema on every row.** Each event lands decoded in a `VARIANT` column. Each org's Avro schemas are stored once, in a Lakebase schema registry, so a customer adding a field never needs a restart or a table change.
 
 It replaces the single-tenant [`(depr) go_salesforce_zerobus_cgo`](../%28depr%29%20go_salesforce_zerobus_cgo/DEPRECATED.md), and it can run that service's configuration unchanged (see [Migrating](#migrating-from-go_salesforce_zerobus_cgo-or-the-python-service)).
 
@@ -19,7 +20,7 @@ It replaces the single-tenant [`(depr) go_salesforce_zerobus_cgo`](../%28depr%29
 - [Tenant credentials (Unity Catalog secrets)](#tenant-credentials-unity-catalog-secrets)
 - [Runtime contract](#runtime-contract-any-container-platform)
 - [Configuration](#configuration)
-- [Delivery semantics](#delivery-semantics) · [Delta table](#delta-table) · [Operating](#operating)
+- [Delivery semantics](#delivery-semantics) · [Delta table](#delta-table) · [Downstream pipeline](#downstream-pipeline) · [Operating](#operating)
 - [Scaling and capacity](#scaling-and-capacity)
 - [Migrating](#migrating-from-go_salesforce_zerobus_cgo-or-the-python-service) · [Development](#development) · [Troubleshooting](#troubleshooting)
 
@@ -56,13 +57,13 @@ The postdeploy hook runs as you, the deployer:
 1. `zerobus bootstrap lakebase` creates the service principal's Postgres role and grants it `CONNECT, CREATE` on the database.
 2. `zerobus bootstrap uc-secrets` grants the service principal `USE SCHEMA` and `READ SECRET` on the secrets schema. Bundles can't declare secret grants themselves.
 
-On first start, or with `zerobus migrate`, the service creates and owns its `sfzb` Postgres schema (registry, status, checkpoints). `make bootstrap` re-runs both grant steps.
+On first start, or with `zerobus migrate`, the service creates and owns its `sfzb` Postgres schema (registry, status, checkpoints, schema registry). `make bootstrap` re-runs both grant steps.
 
 ### 2. Grant access to the target Delta tables
 
 The bundle doesn't manage the CDC tables. On the target catalog and schema, the service principal needs:
 - `USE CATALOG` on the catalog (this also covers the secrets schema);
-- `USE SCHEMA` and `CREATE TABLE` on the schema, so the service can create and migrate tables. Alternatively, pre-create each table with the DDL from `zerobus ddl <catalog.schema.table>` and grant `SELECT, MODIFY` on it.
+- `USE SCHEMA` and `CREATE TABLE` on the schema, so the service can create and migrate tables. Alternatively, pre-create each table with the DDL from `zerobus ddl <catalog.schema.table>` (add `-payload-format avro` for the legacy layout) and grant `SELECT, MODIFY` on it.
 - `CAN USE` on a SQL warehouse, used for table DDL only.
 
 ### 3. Run the container
@@ -167,6 +168,8 @@ Flags override environment variables; `sfzb run -h` lists everything.
 | `SFZB_CHECKPOINT_INTERVAL` | `5s` | Batched checkpoint commit interval |
 | `SFZB_WAREHOUSE_ID` | — | SQL warehouse for Delta DDL (`SFZB_SCHEMA_MODE=migrate`) |
 | `SFZB_SCHEMA_MODE` | `migrate` | `migrate` (create tables and add columns), `verify`, `off` |
+| `SFZB_PAYLOAD_FORMAT` | `variant` | Payload columns per row: `variant`, `avro` (the original layout; default in legacy single-tenant mode), or `both` (see [Delta table](#delta-table)) |
+| `SFZB_SCHEMA_REGISTRY` | `true` | Record Avro schemas in Lakebase `sfzb.schemas` and check it before Salesforce `GetSchema`. Ignored without Lakebase. |
 | `SFZB_SECRETS_TTL`, `SFZB_SECRETS_RPS` | `15m`, `10` | UC secret cache lifetime and read rate |
 | `SFZB_SF_SUBS_PER_CONN` | `100` | Subscribe streams per shared gRPC connection |
 | `SFZB_ZB_STREAMS_PER_TABLE` | `auto` | Stream slots per table (`auto` = 1 per 250 subscriptions, max 16) |
@@ -183,26 +186,121 @@ Flags override environment variables; `sfzb run -h` lists everything.
   2. otherwise `replay_default`.
 - **Quiet orgs** move their checkpoint forward on Salesforce keepalives, so their replay IDs don't age out.
 - **Expired replay IDs** (Salesforce keeps about 72h of events) fall back to `on_replay_expired`, count in `sfzb_replay_fallback_total`, and are logged as errors.
-- **Undecodable events** are still written: the raw `payload_binary` and `schema_json` are kept and `decode_error` is set.
-- **Rows larger than 8MiB** drop `schema_json`, then `record_data_json`, then `payload_binary`, and record what was dropped in `decode_error`.
+- **Undecodable events** are still written, in every format: the raw `payload_binary` and `schema_json` are kept and `decode_error` is set (in `variant` mode, `record` is NULL).
+- **Rows larger than 8MiB** drop `schema_json`, then `record_data_json`, then `payload_binary`, then `record`, and record what was dropped in `decode_error`. Salesforce caps events at 1MB, so this is a safety net.
 
 ## Delta table
 
-The table keeps the original 16 columns shared with the Python service and adds 7 nullable columns:
+Every row has the event and `ChangeEventHeader` columns:
+- `event_id`, `schema_id`, `replay_id` (hex);
+- `timestamp` and `processed_timestamp` (ingest time, epoch ms);
+- `change_type`, `entity_name`, `change_origin`;
+- `record_ids`, `changed_fields`, `nulled_fields`, `diff_fields` (field names, decoded from Salesforce's bitmaps);
+- `commit_number`, `sequence_number`, `transaction_key`, `commit_user`;
+- `org_id`, `tenant_key`, `topic`, and `decode_error`.
 
-| Column | Source |
+The payload columns depend on `SFZB_PAYLOAD_FORMAT`:
+
+| Format | Payload columns written | Use it for |
+|---|---|---|
+| `variant` (default) | `record VARIANT`: the decoded event | New pipelines: there's no per-row schema, and fields are queried directly |
+| `avro` | `record_data_json`, `payload_binary`, `schema_json` (the original layout) | Existing `from_avro` pipelines. Legacy single-tenant mode defaults to it. |
+| `both` | All of the above | Moving a pipeline from `avro` to `variant` |
+
+`zerobus ddl <table>` prints the DDL for the configured format. `variant` tables have all 24 columns (Zerobus needs a column for every field it's sent, even ones left empty). `avro` tables don't need `record`.
+
+### Querying `record`
+
+`record` holds the whole decoded event, including `ChangeEventHeader`, with Avro unions unwrapped (`{"Name":"Acme"}`). Custom fields work like standard ones:
+
+```sql
+SELECT org_id, entity_name, change_type, record_ids[0]                AS id,
+       record:Name::string                                             AS name,
+       record:BillingAddress.City::string                              AS city,
+       record:Region__c::string                                        AS region,
+       timestamp_millis(record:ChangeEventHeader.commitTimestamp::bigint) AS committed_at
+FROM main.salesforce.cdc_events
+WHERE org_id = '00D...' AND entity_name = 'Account';
+```
+
+- **Updates carry only changed fields.** An absent field means "unchanged", not NULL. `changed_fields` lists what changed, and `nulled_fields` lists what was cleared.
+- **`try_variant_get(record, '$.Field', 'type')`** returns NULL instead of failing when a value doesn't fit the type.
+- **`schema_of_variant_agg(record)`** shows the fields an object has carried.
+- **Speed.** Tables the service creates enable [variant shredding](https://docs.databricks.com/aws/en/delta/variant-shredding) (`delta.enableVariantShredding`), which stores frequently occurring fields as typed columns, so these reads don't parse JSON. Reading shredded tables needs Databricks Runtime 17.3+ or a SQL warehouse.
+- **Older tables don't get shredding automatically** when `migrate` adds `record`. Opt in with `ALTER TABLE ... SET TBLPROPERTIES ('delta.enableVariantShredding' = 'true')`.
+
+### Schema registry (Lakebase)
+
+With Lakebase configured, the service stores each Avro schema once, in `sfzb.schemas`, instead of on every row:
+
+| Column | |
 |---|---|
-| `topic` | Pub/Sub topic |
-| `tenant_key` | registry tenant key |
-| `decode_error` | set when decoding failed or the row was truncated |
-| `commit_number`, `sequence_number`, `transaction_key`, `commit_user` | `ChangeEventHeader` |
+| `org_id`, `schema_id` | Primary key. Salesforce issues a new schema ID whenever an object's fields change, so rows are never updated. |
+| `tenant_key`, `topic`, `entity_name` | Where the schema was first seen. `entity_name` comes from the schema name (`AccountChangeEvent` → `Account`, `Invoice__ChangeEvent` → `Invoice__c`). |
+| `schema_json` | The Avro schema |
+| `first_seen_at` | |
+
+How the service uses it:
+- **On a schema cache miss** it checks the registry before calling Salesforce `GetSchema`, so restarts and new replicas don't refetch every org's schemas. `sfzb_schema_fetches_total` counts the Salesforce calls, and `sfzb_schema_registry_lookups_total{result}` counts the lookups.
+- **Lakebase never blocks ingestion.** A failed lookup falls back to Salesforce. Writes are queued, batched and retried.
+- **Downstream jobs** read the registry to generate typed views over `record` (see [Downstream pipeline](#downstream-pipeline)).
+- **Pre-created table.** If someone creates `sfzb.schemas` by hand, the service principal needs `GRANT SELECT, INSERT ON sfzb.schemas`. Startup fails with that exact statement if it's missing.
+
+### When a customer changes their schema
+
+Adding or changing a field gives the object a new Salesforce schema ID:
+1. the service decodes events with the new schema;
+2. the field appears in `record` right away;
+3. the registry gains a row.
+
+There's no restart, no table change, and no pipeline change. Typed views pick the field up the next time they're generated, and until then it's queryable as `record:New_Field__c`.
+
+### Migration and routing
 
 - **Migration:** `SFZB_SCHEMA_MODE=migrate` adds missing columns with `ALTER TABLE ... ADD COLUMNS` and never drops or retypes a column.
+  - In `variant` mode, an older table gains `record VARIANT`.
+  - In `avro` mode, the table is left exactly as it was.
 - **New tables** use `CLUSTER BY (org_id, entity_name)`.
-- **`record_data_json`** is standard JSON (unions unwrapped), matching the Python service.
 - **Routing:** by default all orgs share one table, keyed by `org_id`, `tenant_key` and `topic`. Set `subscriptions.target_table` to give an org, or one object, its own table.
 
-**Downstream:** `python/lakeflow_declarative_pipeline.py` infers each object's Avro schema from the latest row across *all* orgs, which assumes one org per table. Before many orgs share a table, make that lookup `org_id`-aware, or route orgs to separate tables.
+**Downstream:** use the [CDC pipeline](#downstream-pipeline) for `variant` tables. The older `python/lakeflow_declarative_pipeline.py` reads the `avro` layout, and it infers each object's schema from the latest row across *all* orgs, so it assumes one org per table.
+
+## Downstream pipeline
+
+[`pipeline/`](pipeline/) turns a `variant` table into current state and history for every org, with no schemas to manage. The bundle deploys it from [`resources/pipeline.yml`](resources/pipeline.yml):
+
+| Object | What it is |
+|---|---|
+| `salesforce_current` | One row per `(org_id, entity_name, Id)`. `fields` (VARIANT) is the record's merged current state, and deletes are soft (`_is_deleted`). It's a Delta table with Change Data Feed that the pipeline MERGEs into but doesn't manage, so a full refresh never resets it. |
+| `salesforce_history` | SCD2 history from that table's Change Data Feed. `fields_json` is the record's state at each version (`parse_json` it). |
+| `salesforce_decode_errors` | Events the service couldn't decode |
+| `<views_schema>.<tenant>__<object>` | A typed view of one org's object, with a column per field it has ever had (generated) |
+| `<views_schema>.all_orgs__<object>` | The object across orgs: typed columns for the fields every org shares, plus `fields` for the rest (generated) |
+
+How it behaves:
+- **Sparse updates are folded correctly** ([`pipeline/cdc_fold.py`](pipeline/cdc_fold.py)):
+  - only fields in `changed_fields` and `nulled_fields` change;
+  - compound fields change only the listed subfields (`BillingAddress.City`);
+  - large text fields in `diff_fields` have their unified diff applied to the prior value, and the value is kept if the diff's hash doesn't match;
+  - an event that names several records updates each of them.
+- **Redelivery can't roll a field back.** Each record keeps a watermark (commit timestamp, commit number, sequence number, replay ID), and older or duplicate events are skipped.
+- **New orgs, objects and fields need no restart.** Nothing in the pipeline depends on a schema.
+- **Typed views come from the schema registry.** The `typed_views` job (hourly; paused in `dev`) reads `sfzb.schemas` directly from Lakebase with an OAuth database credential. It regenerates only the objects that gained a schema version, and replacing a view is metadata only.
+- **View types.**
+  - Standard fields are typed from Salesforce's `doc` hints: `DateTime` becomes `TIMESTAMP`, `Date` becomes `DATE`, and Address fields become `STRUCT`s.
+  - Custom fields carry no type hint, so a custom date stays `BIGINT` epoch millis unless you set `view_type_overrides`, e.g. `{"Account.SLAExpirationDate__c": "date"}`.
+
+```bash
+make bundle-deploy PROFILE=<p> CATALOG=<catalog> CDC_TABLE=<catalog.schema.cdc_events> PIPELINE_CATALOG=<catalog> PIPELINE_SCHEMA=<schema>
+databricks bundle run salesforce_cdc -t dev --profile <p>   # run the pipeline (triggered; set continuous: true for always-on)
+databricks bundle run typed_views -t dev --profile <p>      # generate typed views now
+```
+
+The pipeline and the job run as the deployer, who needs:
+- `SELECT` on the CDC table and `CREATE TABLE` on `pipeline_schema`;
+- a Lakebase Postgres role with `SELECT` on `sfzb.schemas` (the project owner has one).
+
+To browse the registry in Catalog Explorer as well, [register the Lakebase database in Unity Catalog](https://docs.databricks.com/aws/en/oltp/projects/register-uc). Query it from a serverless SQL warehouse, and refresh the catalog in Catalog Explorer to pick up new tables.
 
 ## Operating
 
@@ -281,13 +379,16 @@ Where it resumes from depends on whether Lakebase is configured:
 - **Without Lakebase:** checkpoints are derived from the Delta table itself (the latest row), which is the same resume behavior as the old services.
 - **With `SFZB_LAKEBASE_ENDPOINT`:** checkpoints go to Lakebase. The first start seeds from the old rows in the table (`SFZB_SEED_FROM_DELTA=true`).
 
+Legacy mode keeps the `avro` row layout its pipeline reads. To switch to `variant`, set `SFZB_PAYLOAD_FORMAT=both` while you move the pipeline over, then `variant`.
+
 To go multi-tenant, store the org's credentials as a UC secret, register it in `sfzb.tenants`, set `SFZB_TENANT_SOURCE=lakebase`, and drop the `SALESFORCE_*` variables.
 
 ## Development
 
 ```bash
 make lint test-race        # unit, component and in-process e2e tests (fake Salesforce + in-memory Zerobus)
-make test-pg               # registry and checkpoint SQL against a throwaway local Postgres
+make test-pg               # registry, checkpoint and schema registry SQL against a throwaway local Postgres
+make test-pipeline         # pipeline event folding and typed-view SQL (pure Python)
 make build build-linux     # static binaries in ./bin
 make load                  # capacity run (see "How the test works")
 make demo                  # fake Salesforce for 20 orgs; prints the env to run ./bin/sfzb against it
@@ -308,4 +409,6 @@ See [DESIGN.md](DESIGN.md) for the internals: flow control, checkpoint invariant
 | `bundle deploy` fails with `forced token refresh: cache update: exit status 45` | The Terraform provider's refresh of your CLI token failed. Deploy with the profile's current token: `DATABRICKS_HOST=https://<workspace> DATABRICKS_TOKEN=$(databricks auth token --profile <p> \| jq -r .access_token) DATABRICKS_CONFIG_FILE=/dev/null databricks bundle deploy -t dev --var service_principal_app_id=<sp> --var catalog=<catalog>` |
 | `lakebase credential: Invalid Token` after running for a while (older builds) | Fixed. Tokens are now refreshed in the background and expiry is tracked on the wall clock, so host sleep or a suspended container VM can no longer leave an expired token in use. Upgrade to the current build. |
 | CLI returns `Refresh token is invalid` | Sign in again: `databricks auth login --host https://<workspace> --profile <p>` |
+| Startup fails with `schema registry sfzb.schemas is not readable and writable by …` | The table was created by someone other than the service principal. Run the `GRANT SELECT, INSERT …` from the message as the table owner, or set `SFZB_SCHEMA_REGISTRY=false` |
+| `record` is NULL on some rows | Those events couldn't be decoded. `decode_error` says why, and `payload_binary` and `schema_json` hold the raw event. |
 | Zerobus stream stays `broken` with a permission error | The service principal needs `USE CATALOG`, `USE SCHEMA` and `SELECT, MODIFY` (or `CREATE TABLE`) on the target table's schema |

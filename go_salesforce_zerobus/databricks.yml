@@ -5,6 +5,9 @@
 #   - a Lakebase Postgres project (tenant registry, checkpoints, status)
 #   - a dedicated Unity Catalog schema for tenant credentials, stored as
 #     Unity Catalog secrets (uc-secret://<catalog>.<schema>.<secret>)
+#   - downstream (resources/pipeline.yml): the CDC pipeline (current state +
+#     SCD2 history) and the job that generates typed views from the Lakebase
+#     schema registry
 # The CDC target tables are governed separately: the service principal needs
 # USE CATALOG, USE SCHEMA, and CREATE TABLE (or SELECT + MODIFY on
 # pre-created tables) on the target schema; see README "Quick start".
@@ -16,6 +19,9 @@
 
 bundle:
   name: go-salesforce-zerobus
+
+include:
+  - resources/*.yml
 
 variables:
   service_principal_app_id:
@@ -38,6 +44,21 @@ variables:
   protect_branch:
     description: Protect the production branch from deletion and reset.
     default: false
+  cdc_table:
+    description: Zerobus target table the pipeline reads (written with SFZB_PAYLOAD_FORMAT=variant or both).
+    default: main.salesforce.cdc_events
+  pipeline_catalog:
+    description: Catalog for salesforce_current, salesforce_history, and the typed views.
+    default: main
+  pipeline_schema:
+    description: Schema (must exist) for salesforce_current and salesforce_history.
+    default: salesforce
+  views_schema:
+    description: Schema for generated typed views (created if missing, in pipeline_catalog).
+    default: salesforce_views
+  view_type_overrides:
+    description: 'JSON type overrides for custom fields Salesforce sends without a type hint, e.g. {"Account.SLAExpirationDate__c": "date"}.'
+    default: "{}"
 
 resources:
   postgres_projects:

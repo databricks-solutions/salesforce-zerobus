@@ -9,7 +9,7 @@
 //	zerobus checkpoint get|reset T TOPIC inspect or reset a replay checkpoint
 //	zerobus bootstrap lakebase           grant the service principal Lakebase access (run as project owner)
 //	zerobus bootstrap uc-secrets         grant the service principal READ SECRET on the tenant secrets schema
-//	zerobus ddl TABLE                    print CREATE TABLE for a target table (to pre-create it)
+//	zerobus ddl [-payload-format F] TABLE print CREATE TABLE for a target table (to pre-create it)
 //	zerobus healthcheck                  exit 0 if the local /healthz is OK (for exec probes)
 //	zerobus version
 //
@@ -39,6 +39,7 @@ import (
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/checkpoint"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/checkpoint/lakebase"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/config"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/event"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/obs"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/tablemgr"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/tenant"
@@ -72,14 +73,7 @@ func main() {
 	case "bootstrap":
 		err = bootstrap(ctx, args)
 	case "ddl":
-		if len(args) != 1 {
-			err = errors.New("usage: zerobus ddl catalog.schema.table")
-			break
-		}
-		var ddl string
-		if ddl, err = tablemgr.CreateTableDDL(args[0]); err == nil {
-			fmt.Println(ddl + ";")
-		}
+		err = ddl(args)
 	case "healthcheck":
 		err = healthcheck(args)
 	case "version":
@@ -110,13 +104,39 @@ commands:
   checkpoint get|reset TENANT TOPIC
   bootstrap lakebase -sp APP_ID -endpoint EP [-writer IDENTITY]...
   bootstrap uc-secrets -sp APP_ID -schema CATALOG.SCHEMA [-writer IDENTITY]...
-  ddl TABLE                   print CREATE TABLE for a target table (to pre-create it)
+  ddl [-payload-format F] TABLE
+                              print CREATE TABLE for a target table (to pre-create it)
   healthcheck                 exit 0 if the local /healthz is OK
   version
 
 Service settings come from SFZB_* and DATABRICKS_* environment variables;
 see "zerobus run -h".
 `)
+}
+
+func ddl(args []string) error {
+	fs := flag.NewFlagSet("ddl", flag.ContinueOnError)
+	def := os.Getenv("SFZB_PAYLOAD_FORMAT")
+	if def == "" {
+		def = string(event.FormatVariant)
+	}
+	format := fs.String("payload-format", def, "variant | avro | both")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: zerobus ddl [-payload-format variant|avro|both] catalog.schema.table")
+	}
+	f, err := event.ParseFormat(*format)
+	if err != nil {
+		return err
+	}
+	stmt, err := tablemgr.CreateTableDDL(fs.Arg(0), f)
+	if err != nil {
+		return err
+	}
+	fmt.Println(stmt + ";")
+	return nil
 }
 
 func loadConfig(args []string) (*config.Service, error) {
@@ -157,7 +177,7 @@ func validate(ctx context.Context, args []string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	fmt.Printf("configuration OK (tenant source %s, checkpoint store %s, sink %s)\n", cfg.TenantSource, cfg.CheckpointStore, cfg.Sink)
+	fmt.Printf("configuration OK (tenant source %s, checkpoint store %s, sink %s, payload format %s)\n", cfg.TenantSource, cfg.CheckpointStore, cfg.Sink, cfg.PayloadFormat)
 	switch cfg.TenantSource {
 	case "file":
 		env, err := cliEnv(ctx, cfg, false)
@@ -220,7 +240,17 @@ func migrate(ctx context.Context, args []string) error {
 		if err := lakebase.New(env.Pool, cfg.LakebaseSchema).Init(ctx); err != nil {
 			return err
 		}
-		fmt.Printf("Lakebase schema %s ready (registry, status, checkpoints)\n", cfg.LakebaseSchema)
+		parts := "registry, status, checkpoints"
+		if schemas := env.SchemaRegistry(); schemas != nil {
+			if err := schemas.Init(ctx); err != nil {
+				return err
+			}
+			if err := schemas.GrantReaders(ctx, cfg.RegistryWriters); err != nil {
+				return err
+			}
+			parts += ", schemas"
+		}
+		fmt.Printf("Lakebase schema %s ready (%s)\n", cfg.LakebaseSchema, parts)
 		snap, _, err := reg.Load(ctx)
 		if err != nil {
 			return err

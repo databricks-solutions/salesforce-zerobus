@@ -22,7 +22,7 @@ func sampleEvent() *CDCEvent {
 
 func TestToProto(t *testing.T) {
 	now := time.UnixMilli(1_700_000_000_000)
-	row := ToProto(sampleEvent(), Source{OrgID: "00D", TenantKey: "acme", Topic: "/data/AccountChangeEvent"}, now)
+	row := ToProto(sampleEvent(), Source{OrgID: "00D", TenantKey: "acme", Topic: "/data/AccountChangeEvent"}, FormatVariant, now)
 	if row.GetReplayId() != "002a" {
 		t.Errorf("replay_id = %q, want hex 002a", row.GetReplayId())
 	}
@@ -44,7 +44,7 @@ func TestMarshalTruncates(t *testing.T) {
 	e := sampleEvent()
 	e.SchemaJSON = strings.Repeat("s", 5000)
 	e.RecordDataJSON = strings.Repeat("r", 5000)
-	row := ToProto(e, Source{OrgID: "00D"}, time.Now())
+	row := ToProto(e, Source{OrgID: "00D"}, FormatAvro, time.Now())
 
 	data, truncated, err := Marshal(proto.Clone(row).(*eventpb.SalesforceEvent), 1<<20)
 	if err != nil || truncated || len(data) == 0 {
@@ -66,7 +66,57 @@ func TestMarshalTruncates(t *testing.T) {
 		t.Errorf("decode_error = %q", got.GetDecodeError())
 	}
 
-	if _, _, err := Marshal(ToProto(e, Source{}, time.Now()), 10); err == nil {
+	if _, _, err := Marshal(ToProto(e, Source{}, FormatAvro, time.Now()), 10); err == nil {
 		t.Fatal("expected error when row cannot fit")
+	}
+
+	// Only populated columns are dropped, and a decode error is kept once.
+	e.DecodeError = "avro decode: bad"
+	row = ToProto(e, Source{}, FormatVariant, time.Now())
+	data, truncated, err = Marshal(row, 200)
+	if err != nil || !truncated {
+		t.Fatalf("truncated=%v err=%v", truncated, err)
+	}
+	if got := row.GetDecodeError(); got != "avro decode: bad; truncated: dropped schema_json" {
+		t.Errorf("decode_error = %q", got)
+	}
+}
+
+func TestToProtoFormats(t *testing.T) {
+	src := Source{OrgID: "00D"}
+	variant := ToProto(sampleEvent(), src, FormatVariant, time.Now())
+	if variant.GetRecord() != `{"Name":"Acme"}` || variant.RecordDataJson != nil || variant.PayloadBinary != nil || variant.SchemaJson != nil {
+		t.Errorf("variant row should carry only record: %v", variant)
+	}
+	if def := ToProto(sampleEvent(), src, "", time.Now()); !proto.Equal(def, variant) {
+		t.Errorf("empty format should be variant")
+	}
+	avro := ToProto(sampleEvent(), src, FormatAvro, time.Now())
+	if avro.Record != nil || avro.GetRecordDataJson() == "" || len(avro.PayloadBinary) == 0 || avro.GetSchemaJson() == "" {
+		t.Errorf("avro row should carry the legacy columns only: %v", avro)
+	}
+	both := ToProto(sampleEvent(), src, FormatBoth, time.Now())
+	if both.GetRecord() == "" || both.GetRecordDataJson() == "" || len(both.PayloadBinary) == 0 || both.GetSchemaJson() == "" {
+		t.Errorf("both row should carry every payload column: %v", both)
+	}
+
+	// An undecodable event keeps its raw payload so it can be recovered.
+	bad := sampleEvent()
+	bad.RecordDataJSON, bad.DecodeError = "", "avro decode: short buffer"
+	row := ToProto(bad, src, FormatVariant, time.Now())
+	if row.Record != nil || len(row.PayloadBinary) == 0 || row.GetSchemaJson() == "" || row.GetDecodeError() == "" {
+		t.Errorf("undecodable variant row should keep payload_binary and schema_json: %v", row)
+	}
+
+	for in, want := range map[string]Format{"variant": FormatVariant, " AVRO ": FormatAvro, "both": FormatBoth} {
+		if f, err := ParseFormat(in); err != nil || f != want {
+			t.Errorf("ParseFormat(%q) = %q, %v", in, f, err)
+		}
+	}
+	if _, err := ParseFormat("json"); err == nil {
+		t.Error("ParseFormat should reject unknown formats")
+	}
+	if FormatAvro.Includes("record") || !FormatVariant.Includes("record") || !FormatAvro.Includes("schema_json") {
+		t.Error("Includes: only the avro layout omits record")
 	}
 }

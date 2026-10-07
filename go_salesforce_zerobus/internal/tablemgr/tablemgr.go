@@ -2,6 +2,8 @@
 // their columns match the SalesforceEvent protobuf. Zerobus rejects streams
 // whose descriptor has fields the table lacks, so this runs before a table's
 // first stream opens. Columns are only ever added, never dropped or retyped.
+// The column set follows the payload format: the avro layout has no record
+// VARIANT column, so pre-existing tables are never altered to add one.
 package tablemgr
 
 import (
@@ -17,6 +19,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/dbsql"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/event"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/proto/eventpb"
 )
 
@@ -37,18 +40,27 @@ type TablesAPI interface {
 // Column is a Delta column derived from the protobuf.
 type Column struct{ Name, Type string }
 
-// Columns returns the expected columns in declaration order.
-func Columns() []Column {
+// Columns returns the expected columns for format in declaration order.
+func Columns(format event.Format) []Column {
 	fields := (&eventpb.SalesforceEvent{}).ProtoReflect().Descriptor().Fields()
 	out := make([]Column, 0, fields.Len())
 	for i := 0; i < fields.Len(); i++ {
 		f := fields.Get(i)
-		out = append(out, Column{Name: string(f.Name()), Type: deltaType(f)})
+		if format.Includes(string(f.Name())) {
+			out = append(out, Column{Name: string(f.Name()), Type: deltaType(f)})
+		}
 	}
 	return out
 }
 
+// columnTypes overrides the type derived from the proto kind. Zerobus writes
+// a proto string holding JSON text into a VARIANT column.
+var columnTypes = map[string]string{"record": "VARIANT"}
+
 func deltaType(f protoreflect.FieldDescriptor) string {
+	if t, ok := columnTypes[string(f.Name())]; ok {
+		return t
+	}
 	var t string
 	switch f.Kind() {
 	case protoreflect.StringKind:
@@ -79,6 +91,7 @@ type Manager struct {
 	Tables TablesAPI
 	SQL    *dbsql.Client
 	Mode   Mode
+	Format event.Format // default variant
 	Logger *slog.Logger
 
 	mu   sync.Mutex
@@ -140,7 +153,7 @@ func (m *Manager) diff(ctx context.Context, table string) (missing []Column, exi
 		have[strings.ToLower(c.Name)] = strings.ToUpper(strings.ReplaceAll(c.TypeText, " ", ""))
 	}
 	var mismatched []string
-	for _, c := range Columns() {
+	for _, c := range Columns(m.format()) {
 		t, ok := have[c.Name]
 		switch {
 		case !ok:
@@ -166,22 +179,35 @@ func typesEqual(have, want string) bool {
 	return norm(have) == norm(want)
 }
 
-// CreateTableDDL returns the CREATE TABLE statement for table.
-func CreateTableDDL(table string) (string, error) {
+func (m *Manager) format() event.Format {
+	if m.Format == "" {
+		return event.FormatVariant
+	}
+	return m.Format
+}
+
+// CreateTableDDL returns the CREATE TABLE statement for table and format.
+// Tables with the record VARIANT column enable variant shredding, which
+// stores frequently occurring fields as typed columns for fast reads.
+func CreateTableDDL(table string, format event.Format) (string, error) {
 	qt, err := dbsql.QuoteTable(table)
 	if err != nil {
 		return "", err
 	}
 	var cols []string
-	for _, c := range Columns() {
+	for _, c := range Columns(format) {
 		cols = append(cols, "  "+c.Name+" "+c.Type)
 	}
+	props := []string{"'delta.autoOptimize.optimizeWrite' = 'true'", "'delta.autoOptimize.autoCompact' = 'true'"}
+	if format.Includes("record") {
+		props = append(props, "'delta.enableVariantShredding' = 'true'")
+	}
 	return "CREATE TABLE IF NOT EXISTS " + qt + " (\n" + strings.Join(cols, ",\n") + "\n)\nCLUSTER BY (org_id, entity_name)\n" +
-		"TBLPROPERTIES ('delta.autoOptimize.optimizeWrite' = 'true', 'delta.autoOptimize.autoCompact' = 'true')", nil
+		"TBLPROPERTIES (" + strings.Join(props, ", ") + ")", nil
 }
 
 func (m *Manager) create(ctx context.Context, table string) error {
-	stmt, err := CreateTableDDL(table)
+	stmt, err := CreateTableDDL(table, m.format())
 	if err != nil {
 		return err
 	}

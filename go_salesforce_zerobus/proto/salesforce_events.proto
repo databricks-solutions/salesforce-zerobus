@@ -40,4 +40,8 @@ message SalesforceEvent {
     optional int32 sequence_number = 21;     // ChangeEventHeader.sequenceNumber
     optional string transaction_key = 22;    // ChangeEventHeader.transactionKey
     optional string commit_user = 23;        // ChangeEventHeader.commitUser
+
+    // Variant layout (SFZB_PAYLOAD_FORMAT=variant|both). Omitted from the
+    // Zerobus descriptor in the avro layout, so older tables need no column.
+    optional string record = 24;             // decoded event as JSON text; the Delta column is VARIANT
 }

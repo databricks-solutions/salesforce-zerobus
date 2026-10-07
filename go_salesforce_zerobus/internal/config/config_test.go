@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/event"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/tenant"
 )
 
@@ -30,6 +31,9 @@ func TestLoadDefaultsAndFlags(t *testing.T) {
 	}
 	if s.CheckpointStore != "lakebase" || s.CheckpointInterval != 10*time.Second || s.UCEndpoint != s.DatabricksHost {
 		t.Errorf("defaults: store=%s interval=%v uc=%s", s.CheckpointStore, s.CheckpointInterval, s.UCEndpoint)
+	}
+	if s.PayloadFormat != event.FormatVariant || !s.SchemaRegistry {
+		t.Errorf("payload format %q, schema registry %v: want variant with the registry on", s.PayloadFormat, s.SchemaRegistry)
 	}
 	if s.ZBRecoveryTimeout != 1500*time.Millisecond || s.SFPubSubAddr != "api.pubsub.salesforce.com:7443" {
 		t.Errorf("legacy ms / pubsub addr: %v %s", s.ZBRecoveryTimeout, s.SFPubSubAddr)
@@ -62,6 +66,14 @@ func TestLoadBadEnv(t *testing.T) {
 	_, err := Load(nil, envMap(map[string]string{"SFZB_SHARD_COUNT": "many"}))
 	if err == nil || !strings.Contains(err.Error(), "SFZB_SHARD_COUNT") {
 		t.Fatalf("err = %v", err)
+	}
+	_, err = Load(nil, envMap(map[string]string{"SFZB_PAYLOAD_FORMAT": "json"}))
+	if err == nil || !strings.Contains(err.Error(), "SFZB_PAYLOAD_FORMAT") {
+		t.Fatalf("err = %v", err)
+	}
+	s, err := Load([]string{"-payload-format", "BOTH", "-schema-registry=false"}, envMap(nil))
+	if err != nil || s.PayloadFormat != event.FormatBoth || s.SchemaRegistry {
+		t.Fatalf("s=%+v err=%v", s, err)
 	}
 }
 
@@ -110,6 +122,9 @@ func TestLegacyTenant(t *testing.T) {
 	}
 	if sub.ReplayDefault != tenant.Earliest || sub.BatchSize != 10 {
 		t.Errorf("sub = %+v", sub)
+	}
+	if s.PayloadFormat != event.FormatAvro {
+		t.Errorf("legacy mode should keep the avro layout its pipeline reads, got %q", s.PayloadFormat)
 	}
 	if err := s.Validate(); err != nil {
 		t.Errorf("Validate: %v", err)

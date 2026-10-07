@@ -53,8 +53,11 @@ type SalesforceEvent struct {
 	SequenceNumber *int32  `protobuf:"varint,21,opt,name=sequence_number,json=sequenceNumber" json:"sequence_number,omitempty"` // ChangeEventHeader.sequenceNumber
 	TransactionKey *string `protobuf:"bytes,22,opt,name=transaction_key,json=transactionKey" json:"transaction_key,omitempty"`  // ChangeEventHeader.transactionKey
 	CommitUser     *string `protobuf:"bytes,23,opt,name=commit_user,json=commitUser" json:"commit_user,omitempty"`              // ChangeEventHeader.commitUser
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Variant layout (SFZB_PAYLOAD_FORMAT=variant|both). Omitted from the
+	// Zerobus descriptor in the avro layout, so older tables need no column.
+	Record        *string `protobuf:"bytes,24,opt,name=record" json:"record,omitempty"` // decoded event as JSON text; the Delta column is VARIANT
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SalesforceEvent) Reset() {
@@ -248,11 +251,18 @@ func (x *SalesforceEvent) GetCommitUser() string {
 	return ""
 }
 
+func (x *SalesforceEvent) GetRecord() string {
+	if x != nil && x.Record != nil {
+		return *x.Record
+	}
+	return ""
+}
+
 var File_salesforce_events_proto protoreflect.FileDescriptor
 
 const file_salesforce_events_proto_rawDesc = "" +
 	"\n" +
-	"\x17salesforce_events.proto\x12\x11salesforce_events\"\xa1\x06\n" +
+	"\x17salesforce_events.proto\x12\x11salesforce_events\"\xb9\x06\n" +
 	"\x0fSalesforceEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1b\n" +
 	"\tschema_id\x18\x02 \x01(\tR\bschemaId\x12\x1b\n" +
@@ -284,7 +294,8 @@ const file_salesforce_events_proto_rawDesc = "" +
 	"\x0fsequence_number\x18\x15 \x01(\x05R\x0esequenceNumber\x12'\n" +
 	"\x0ftransaction_key\x18\x16 \x01(\tR\x0etransactionKey\x12\x1f\n" +
 	"\vcommit_user\x18\x17 \x01(\tR\n" +
-	"commitUserBXZVgithub.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/proto/eventpb"
+	"commitUser\x12\x16\n" +
+	"\x06record\x18\x18 \x01(\tR\x06recordBXZVgithub.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/proto/eventpb"
 
 var (
 	file_salesforce_events_proto_rawDescOnce sync.Once

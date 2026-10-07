@@ -26,6 +26,7 @@ import (
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/obs"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/pubsub"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/registry"
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/schemareg"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/secrets"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/sfauth"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/shard"
@@ -135,7 +136,16 @@ func (e *Env) TableManager() *tablemgr.Manager {
 	if e.Config.SchemaMode == "off" || e.Workspace == nil {
 		return nil
 	}
-	return &tablemgr.Manager{Tables: e.Workspace.Tables, SQL: e.SQL(), Mode: tablemgr.Mode(e.Config.SchemaMode), Logger: e.Logger}
+	return &tablemgr.Manager{Tables: e.Workspace.Tables, SQL: e.SQL(), Mode: tablemgr.Mode(e.Config.SchemaMode), Format: e.Config.PayloadFormat, Logger: e.Logger}
+}
+
+// SchemaRegistry returns the Lakebase schema registry, or nil when it is
+// disabled or Lakebase is not configured.
+func (e *Env) SchemaRegistry() *schemareg.Store {
+	if !e.Config.SchemaRegistry || e.Pool == nil {
+		return nil
+	}
+	return schemareg.New(e.Pool, e.Config.LakebaseSchema, e.Logger)
 }
 
 // Close releases the pool.
@@ -160,7 +170,7 @@ func Run(ctx context.Context, opts Options) error {
 	owner, _ := os.Hostname()
 	logger = logger.With("shard", index)
 	logger.Info("Starting salesforce-zerobus", "version", opts.Version, "shard", index, "shard_count", cfg.ShardCount,
-		"tenant_source", cfg.TenantSource, "checkpoint_store", cfg.CheckpointStore, "sink", cfg.Sink)
+		"tenant_source", cfg.TenantSource, "checkpoint_store", cfg.CheckpointStore, "sink", cfg.Sink, "payload_format", cfg.PayloadFormat)
 
 	needLakebase := cfg.NeedsLakebase() && (opts.Store == nil || opts.Source == nil)
 	env, err := NewEnv(ctx, cfg, logger, needLakebase)
@@ -235,6 +245,17 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer store.Close()
 
+	// Schema registry (Lakebase only).
+	schemas := env.SchemaRegistry()
+	if schemas != nil {
+		if err := schemas.Init(ctx); err != nil {
+			return err
+		}
+		if err := schemas.GrantReaders(ctx, cfg.RegistryWriters); err != nil {
+			return err
+		}
+	}
+
 	// Sink.
 	factory := opts.Factory
 	if factory == nil {
@@ -245,7 +266,7 @@ func Run(ctx context.Context, opts Options) error {
 		} else {
 			factory, err = zbsink.NewSDKFactory(zbsink.SDKConfig{
 				ZerobusEndpoint: cfg.ZerobusEndpoint, UCEndpoint: cfg.UCEndpoint, ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret,
-				AppName: "salesforce-zerobus/" + opts.Version, StreamsPerSDK: cfg.ZBStreamsPerSDK,
+				AppName: "salesforce-zerobus/" + opts.Version, StreamsPerSDK: cfg.ZBStreamsPerSDK, Format: cfg.PayloadFormat,
 				StreamOptions: []zb.StreamOption{
 					zb.WithMaxInflight(cfg.ZBMaxInflight),
 					zb.WithMaxBufferedPayloadBytes(cfg.ZBMaxBufferedBytes),
@@ -278,7 +299,10 @@ func Run(ctx context.Context, opts Options) error {
 	shared := &pubsub.Shared{
 		Conns: conns, Schemas: pubsub.NewSchemaCache(cfg.SchemaCacheBytes),
 		SubscribeLimiter: limiter(cfg.SubscribeRPS), SchemaLimiter: limiter(cfg.SchemaRPS),
-		MaxRowBytes: cfg.ZBMaxPayloadBytes, Logger: logger,
+		Format: cfg.PayloadFormat, MaxRowBytes: cfg.ZBMaxPayloadBytes, Logger: logger,
+	}
+	if schemas != nil {
+		shared.SchemaRegistry = schemas
 	}
 	wms := checkpoint.NewRegistry()
 	sup := supervisor.New(supervisor.Deps{
@@ -384,6 +408,9 @@ func Run(ctx context.Context, opts Options) error {
 	g.Go(func() error { return sup.Run(gctx, owned) })
 	g.Go(func() error { return committer.Run(gctx) })
 	g.Go(func() error { statusLoop(gctx, sup, reg, owner, index, logger); return nil })
+	if schemas != nil {
+		g.Go(func() error { schemas.Run(gctx); return nil })
+	}
 
 	<-gctx.Done()
 	logger.Info("Shutting down", "reason", context.Cause(gctx))
@@ -397,6 +424,11 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if err := committer.Flush(shutdownCtx); err != nil {
 		logger.Error("Final checkpoint commit failed; up to one interval of events will be redelivered", "error", err)
+	}
+	if schemas != nil {
+		if err := schemas.Flush(shutdownCtx); err != nil {
+			logger.Warn("Schemas not recorded in the registry; they are recorded the next time a replica fetches them", "pending", schemas.Pending(), "error", err)
+		}
 	}
 	if reg != nil {
 		writeStatus(shutdownCtx, sup.FinalStatuses(), reg, owner, "stopped")

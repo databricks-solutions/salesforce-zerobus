@@ -179,6 +179,9 @@ func (s *Server) ActiveStreams() int {
 // Subscribes returns the number of Subscribe calls.
 func (s *Server) Subscribes() int64 { return s.subscribes.Load() }
 
+// SchemaCalls returns the number of GetSchema RPCs served.
+func (s *Server) SchemaCalls() int64 { return s.schemaCalls.Load() }
+
 // Delivered returns the number of events sent to subscribers.
 func (s *Server) Delivered() int64 { return s.fetchedTotal.Load() }
 

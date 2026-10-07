@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/event"
 	"github.com/databricks-solutions/salesforce-zerobus/go_salesforce_zerobus/internal/tenant"
 )
 
@@ -85,6 +86,12 @@ type Service struct {
 
 	SchemaMode       string // migrate | verify | off
 	SchemaCacheBytes int64
+	// PayloadFormat is the row layout: variant (record VARIANT column), avro
+	// (raw payload + schema per row), or both.
+	PayloadFormat event.Format
+	// SchemaRegistry records Avro schemas in Lakebase (sfzb.schemas) and
+	// looks them up before Salesforce. Requires Lakebase.
+	SchemaRegistry bool
 
 	AdminAddr       string
 	EnablePprof     bool
@@ -170,6 +177,9 @@ func Load(args []string, getenv Getenv) (*Service, error) {
 
 	fs.StringVar(&s.SchemaMode, "schema-mode", env.str("SFZB_SCHEMA_MODE", "migrate"), "Delta table management: migrate | verify | off")
 	fs.Int64Var(&s.SchemaCacheBytes, "schema-cache-bytes", env.int64("SFZB_SCHEMA_CACHE_BYTES", 256<<20), "Avro schema cache budget")
+	var payloadFormat string
+	fs.StringVar(&payloadFormat, "payload-format", env.str("SFZB_PAYLOAD_FORMAT", ""), "row payload: variant | avro | both (default variant; avro in legacy env mode)")
+	fs.BoolVar(&s.SchemaRegistry, "schema-registry", env.bool("SFZB_SCHEMA_REGISTRY", true), "record Avro schemas in Lakebase (sfzb.schemas) and look them up before Salesforce")
 
 	fs.StringVar(&s.AdminAddr, "admin-addr", env.str("SFZB_ADMIN_ADDR", ":9090"), "admin HTTP listen address (empty disables)")
 	fs.BoolVar(&s.EnablePprof, "pprof", env.bool("SFZB_ENABLE_PPROF", false), "serve /debug/pprof")
@@ -204,6 +214,18 @@ func Load(args []string, getenv Getenv) (*Service, error) {
 			s.TenantSource = "lakebase"
 		}
 	}
+	if payloadFormat == "" {
+		payloadFormat = string(event.FormatVariant)
+		if s.Legacy {
+			// Drop-in migrations keep the layout their pipeline reads.
+			payloadFormat = string(event.FormatAvro)
+		}
+	}
+	f, err := event.ParseFormat(payloadFormat)
+	if err != nil {
+		return nil, fmt.Errorf("SFZB_PAYLOAD_FORMAT: %w", err)
+	}
+	s.PayloadFormat = f
 	if s.TenantSource == "file" && len(s.TenantsFiles) == 0 {
 		return nil, errors.New("SFZB_TENANTS_FILE is required with SFZB_TENANT_SOURCE=file")
 	}

@@ -14,7 +14,8 @@
 | `internal/ucsecrets` | Grants on the tenant secrets schema (`bootstrap uc-secrets`) |
 | `internal/sfauth` | OAuth client credentials and SOAP login; per-tenant `TokenSource` (cache, singleflight, proactive refresh) |
 | `internal/pubsub` | Pooled gRPC connections, `Subscription` (fetch/recv loops), Avro schema cache, CDC decoding, error classes |
-| `internal/event` | CDC event → `SalesforceEvent` protobuf row, size guard |
+| `internal/schemareg` | Lakebase schema registry (`sfzb.schemas`): lookups before `GetSchema`, queued and batched writes |
+| `internal/event` | CDC event → `SalesforceEvent` protobuf row for a payload format (`variant`, `avro`, `both`), size guard |
 | `internal/sink/zerobus` | Per-table stream pools, slot writers, ack tracking; SDK factory and in-memory factory |
 | `internal/checkpoint` | Watermarks, committer; Lakebase, Delta-derived and memory stores |
 | `internal/tablemgr` | Delta table creation and additive migration from the protobuf descriptor |
@@ -84,7 +85,7 @@ Watch `sfzb_grpc_stream_open_seconds{target}` for signs that a cap is too high.
 Startup herd control:
 - Token-bucket limiters cover logins, Subscribe calls, GetSchema calls and Databricks Secrets reads.
 - Concurrent logins for one tenant collapse into one call (singleflight).
-- Schema fetches for the same `(org, schema_id)` collapse too.
+- Schema fetches for the same `(org, schema_id)` collapse too, and the Lakebase schema registry answers most of them after the first run (see [Schemas](#schemas)).
 - A small random stagger spreads the first starts.
 
 ## Failure handling
@@ -133,6 +134,41 @@ Streams are opened with `CreateStreamWithProvider` and the service's own token p
 - The provider sends the identical request (same audience and `authorization_details`), so the token grants the same privileges.
 - Tokens are cached per table until 5 minutes before expiry, and concurrent mints collapse into one.
 - Remove this once the SDK raises the limit.
+
+## Schemas
+
+Each event's Avro schema is resolved in this order:
+1. **The in-memory LRU cache**, keyed by `(org_id, schema_id)` because CDC schemas include org-specific custom fields.
+2. **The Lakebase schema registry** (`sfzb.schemas`, primary key `(org_id, schema_id)`), with a 5s timeout.
+3. **Salesforce `GetSchema`**, rate limited.
+
+Concurrent misses for the same key share one resolution.
+
+A schema fetched from Salesforce is queued for the registry. `Run` writes the queue in batches of up to 4 MiB with `ON CONFLICT DO NOTHING`, so replicas racing on the same schema converge on one row.
+- **Failures** are retried every 30s.
+- **Queue limit:** the queue is capped at 64 MiB. Past that, schemas are dropped and re-recorded the next time any replica misses them.
+- **Shutdown** flushes what's left of the queue.
+
+Registry lookup failures fall back to Salesforce, so Lakebase is never on the critical path for decoding.
+
+Why Lakebase rather than a Delta table:
+- **The access pattern is point lookups.** The service reads the registry by key on cache misses: a cold start of 4,000 orgs is about 40,000 lookups.
+- **Exactly one row per schema.** A primary key gives that, where an at-least-once Zerobus stream would write duplicates.
+- **Small.** It holds about 100,000 schemas of 5–100 KB, which Postgres TOAST-compresses.
+
+The typed-views job (`pipeline/generate_views.py`) reads it directly from Lakebase to generate typed views.
+
+### Payload formats
+
+| Format | `record` (field 24, `VARIANT`) | `record_data_json`, `payload_binary`, `schema_json` |
+|---|---|---|
+| `variant` (default) | the decoded event as JSON text | only when decoding fails (raw payload kept for recovery) |
+| `avro` (default in legacy env mode) | not in the descriptor | always |
+| `both` | the decoded event | always |
+
+- **Mapping:** Zerobus maps a `VARIANT` column to a proto `string` holding JSON text. `tablemgr` overrides the type of `record` to `VARIANT`.
+- **The avro descriptor omits `record`**, so tables created before the variant layout need no new column and are never altered to add one. Unset proto2 fields aren't serialized, so the same row message works for every format.
+- **Content:** `record` is the same JSON the original layout puts in `record_data_json` (standard JSON, unions unwrapped, including `ChangeEventHeader`), so moving a pipeline from `parse_json(record_data_json)` to `record` is mechanical.
 
 ## Schema evolution
 
